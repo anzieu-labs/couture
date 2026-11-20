@@ -1,6 +1,9 @@
 "use client";
 
-import type { P2 } from "@/lib/pattern/curves";
+import { useMemo, useState } from "react";
+import { download, exportDxf, exportPdf, exportSvg, type ExportOptions } from "@/lib/pattern/export";
+import { cutPieces } from "@/lib/pattern/markings";
+import { layoutRow, pieceBlock, type Prim } from "@/lib/pattern/sheet";
 import type { Pattern, TShirtParams } from "@/lib/pattern/tshirt";
 import { RangeField } from "./RangeField";
 import { Section } from "./Section";
@@ -12,6 +15,8 @@ interface Props {
   autoLength: number | null;
   progress: number;
   onResew: () => void;
+  cutting: ExportOptions;
+  onCutting: (o: ExportOptions) => void;
 }
 
 const SEAM_COLORS: Record<string, string> = {
@@ -29,59 +34,124 @@ function seamColor(edgeId: string): string | null {
   return SEAM_COLORS[base] ?? null;
 }
 
-/** Flat pattern pieces, laid out side by side (cm, y up → SVG y down). */
-function PatternSvg({ pattern }: { pattern: Pattern }) {
-  const shown = pattern.pieces.filter((p) => p.id !== "sleeve-");
-  const gap = 6;
-  const boxes = shown.map((piece) => {
-    const pts = piece.edges.flatMap((e) => e.pts);
-    return {
-      piece,
-      minX: Math.min(...pts.map((p) => p[0])), maxX: Math.max(...pts.map((p) => p[0])),
-      minY: Math.min(...pts.map((p) => p[1])), maxY: Math.max(...pts.map((p) => p[1])),
-    };
-  });
-  const offsets = boxes.map((_, i) => boxes.slice(0, i).reduce((s, b) => s + b.maxX - b.minX + gap, 0));
-  const layout = boxes.map((b, i) => {
-    const dx = offsets[i] - b.minX;
-    return { piece: b.piece, dx, minY: b.minY, maxY: b.maxY, cx: dx + (b.minX + b.maxX) / 2 };
-  });
-  const last = boxes[boxes.length - 1];
-  const cursor = offsets[offsets.length - 1] + last.maxX - last.minX + gap;
-  const minY = Math.min(...layout.map((l) => l.minY)), maxY = Math.max(...layout.map((l) => l.maxY));
-  const width = cursor - gap, height = maxY - minY;
-  const tx = (p: P2, dx: number) => `${(p[0] + dx).toFixed(2)},${(maxY - p[1]).toFixed(2)}`;
+const pts = (p: [number, number][]) => p.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
 
+function PreviewPrim({ p }: { p: Prim }) {
+  if (p.kind === "text") return null;
+  const d = `M${pts(p.pts).replaceAll(" ", "L")}${p.closed || p.fill ? "Z" : ""}`;
+  switch (p.role) {
+    case "cut":
+      return <path d={d} fill="white" stroke="var(--color-ink)" strokeWidth={0.3} strokeLinejoin="round" />;
+    case "seam": {
+      const c = p.edge ? seamColor(p.edge) : null;
+      return c ? (
+        <path d={d} fill="none" stroke={c} strokeWidth={0.8} strokeLinecap="round" />
+      ) : (
+        <path d={d} fill="none" stroke="var(--color-muted)" strokeWidth={0.3} strokeDasharray="1 0.7" />
+      );
+    }
+    case "notch":
+      return <path d={d} stroke="var(--color-ink)" strokeWidth={0.4} />;
+    case "fold":
+      return <path d={d} fill="none" stroke="var(--color-muted)" strokeWidth={0.35} strokeDasharray="2.4 0.8 0.4 0.8" />;
+    case "grain":
+      return p.fill ? <path d={d} fill="var(--color-muted)" /> : <path d={d} fill="none" stroke="var(--color-muted)" strokeWidth={0.3} />;
+    default:
+      return null;
+  }
+}
+
+/** Cut pieces side by side: cutting line, stitching line coloured by seam, notches, grain / fold. */
+function PatternSvg({ pattern, cutting }: { pattern: Pattern; cutting: ExportOptions }) {
+  const sheet = useMemo(() => {
+    const pieces = cutPieces(pattern, cutting.allowances, { fold: cutting.fold });
+    return { pieces, ...layoutRow(pieces.map((p) => pieceBlock(p, "preview")), 6) };
+  }, [pattern, cutting]);
+  const { width, height, prims, slots, pieces } = sheet;
   return (
     <svg viewBox={`-3 -3 ${width + 6} ${height + 12}`} className="w-full" role="img" aria-label="Patron du t-shirt">
-      {layout.map(({ piece, dx, cx }) => {
-        const outline = piece.edges.flatMap((e, i) => (i === 0 ? e.pts : e.pts.slice(1)));
-        return (
-          <g key={piece.id}>
-            <path d={`M${outline.map((p) => tx(p, dx)).join("L")}Z`} fill="white" stroke="var(--color-ink)" strokeWidth={0.35} />
-            {piece.edges.map((e) => {
-              const c = seamColor(e.id);
-              return c ? (
-                <polyline key={e.id} points={e.pts.map((p) => tx(p, dx)).join(" ")} fill="none" stroke={c} strokeWidth={0.9} strokeLinecap="round" />
-              ) : null;
-            })}
-            <line
-              x1={piece.grain[0][0] + dx} y1={maxY - piece.grain[0][1]}
-              x2={piece.grain[1][0] + dx} y2={maxY - piece.grain[1][1]}
-              stroke="var(--color-muted)" strokeWidth={0.3} strokeDasharray="1.2 0.8" markerEnd="url(#grain)" markerStart="url(#grain)"
-            />
-            <text x={cx} y={height + 7} textAnchor="middle" fontSize={3.4} fill="var(--color-ink)">
-              {piece.name}{piece.id === "sleeve+" ? " ×2" : ""}
-            </text>
-          </g>
-        );
-      })}
-      <defs>
-        <marker id="grain" viewBox="0 0 6 6" refX="3" refY="3" markerWidth="4" markerHeight="4" orient="auto-start-reverse">
-          <path d="M0,0 L6,3 L0,6 z" fill="var(--color-muted)" />
-        </marker>
-      </defs>
+      {prims.map((p, i) => (
+        <PreviewPrim key={i} p={p} />
+      ))}
+      {pieces.map((piece, i) => (
+        <text key={piece.id} x={slots[i].x + slots[i].w / 2} y={height + 7} textAnchor="middle" fontSize={3.4} fill="var(--color-ink)">
+          {piece.name}
+          {piece.quantity > 1 ? ` ×${piece.quantity}` : ""}
+          {piece.onFold ? " (pli)" : ""}
+        </text>
+      ))}
     </svg>
+  );
+}
+
+const measuresNote = (p: Pattern) => `poitrine finie ${p.dims.chestWidth.toFixed(0)} cm · longueur ${p.dims.length.toFixed(0)} cm`;
+
+const EXPORTS = [
+  { id: "pdf", label: "PDF A4", title: "PDF à l'échelle 1, tuilé sur pages A4 à assembler", run: exportPdf, ext: "pdf" },
+  { id: "svg", label: "SVG 1:1", title: "Planche unique à l'échelle 1 (traceur, découpe)", run: exportSvg, ext: "svg" },
+  { id: "dxf", label: "DXF AAMA", title: "DXF AAMA / ASTM, pièces entières (CLO, Gerber, Optitex…)", run: exportDxf, ext: "dxf" },
+] as const;
+
+function ExportSection({ pattern, cutting, onCutting }: { pattern: Pattern | null; cutting: ExportOptions; onCutting: (o: ExportOptions) => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const al = cutting.allowances;
+  const run = (e: (typeof EXPORTS)[number]) => {
+    if (!pattern) return;
+    setBusy(e.id);
+    // Let the button repaint before the (synchronous) layout search.
+    setTimeout(() => {
+      try {
+        download(e.run(pattern, cutting, measuresNote(pattern)), `t-shirt-col-rond.${e.ext}`);
+      } finally {
+        setBusy(null);
+      }
+    }, 0);
+  };
+  return (
+    <Section title="Marges et export">
+      <div className="space-y-4">
+        <RangeField
+          label="Marges de couture"
+          min={0}
+          max={2}
+          step={0.1}
+          value={al.seam}
+          display={`${al.seam.toLocaleString("fr-FR")} cm`}
+          onChange={(v) => onCutting({ ...cutting, allowances: { ...al, seam: v } })}
+        />
+        <RangeField
+          label="Ourlets (bas et manches)"
+          min={0}
+          max={5}
+          step={0.5}
+          value={al.hem}
+          display={`${al.hem.toLocaleString("fr-FR")} cm`}
+          onChange={(v) => onCutting({ ...cutting, allowances: { ...al, hem: v } })}
+        />
+        <label className="flex items-center gap-2 text-xs">
+          <input type="checkbox" checked={cutting.fold} onChange={(e) => onCutting({ ...cutting, fold: e.target.checked })} className="accent-ink" />
+          <span className="font-medium">Devant et dos au pli</span>
+          <span className="text-muted">(demi-pièces)</span>
+        </label>
+        <div className="flex flex-wrap gap-2">
+          {EXPORTS.map((e) => (
+            <button
+              key={e.id}
+              type="button"
+              title={e.title}
+              disabled={!pattern || busy !== null}
+              onClick={() => run(e)}
+              className="rounded-full border border-line bg-white px-3 py-1.5 text-xs font-medium transition-colors hover:border-ink disabled:opacity-50"
+            >
+              {busy === e.id ? "…" : e.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted">
+          Crans : simple au devant, aux milieux et en haut de manche, double au dos. Le DXF contient toujours les pièces entières.
+        </p>
+      </div>
+    </Section>
   );
 }
 
@@ -91,18 +161,19 @@ const SLIDERS: { key: keyof TShirtParams; label: string; min: number; max: numbe
   { key: "sleeveLength", label: "Longueur de manche", min: 12, max: 40 },
 ];
 
-export function PatternPanel({ pattern, params, onParams, autoLength, progress, onResew }: Props) {
+export function PatternPanel({ pattern, params, onParams, autoLength, progress, onResew, cutting, onCutting }: Props) {
   const simulating = progress > 0 && progress < 1;
   return (
     <>
       <Section title="Patron" aside={pattern ? `${pattern.pieces.length} pièces` : undefined}>
         <div className="rounded-lg border border-line bg-white/60 p-3">
-          {pattern ? <PatternSvg pattern={pattern} /> : <p className="text-xs text-muted">Calcul…</p>}
+          {pattern ? <PatternSvg pattern={pattern} cutting={cutting} /> : <p className="text-xs text-muted">Calcul…</p>}
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted">
             <Legend color={SEAM_COLORS.shoulder} label="Épaules" />
             <Legend color={SEAM_COLORS.side} label="Côtés" />
             <Legend color={SEAM_COLORS.arm} label="Emmanchures" />
             <Legend color={SEAM_COLORS.underBack} label="Dessous de bras" />
+            <Legend color="var(--color-ink)" label="Coupe (marges incluses)" thin />
           </div>
         </div>
       </Section>
@@ -154,6 +225,8 @@ export function PatternPanel({ pattern, params, onParams, autoLength, progress, 
         </div>
       </Section>
 
+      <ExportSection pattern={pattern} cutting={cutting} onCutting={onCutting} />
+
       <div className="flex items-center gap-3">
         <button
           type="button"
@@ -170,10 +243,10 @@ export function PatternPanel({ pattern, params, onParams, autoLength, progress, 
   );
 }
 
-function Legend({ color, label }: { color: string; label: string }) {
+function Legend({ color, label, thin }: { color: string; label: string; thin?: boolean }) {
   return (
     <span className="flex items-center gap-1">
-      <span className="h-0.5 w-3 rounded" style={{ background: color }} />
+      <span className={`${thin ? "h-px" : "h-0.5"} w-3 rounded`} style={{ background: color }} />
       {label}
     </span>
   );

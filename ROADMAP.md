@@ -8,7 +8,8 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   (`tools/mannequin/`), morphologie homme ↔ femme, mensurations lisibles et modifiables (stature,
   poitrine, taille, hanches), 18 ajustements de couture.
 - **Patron** : t‑shirt col rond tracé depuis les mesures du corps (`lib/pattern/tshirt.ts`), 4 pièces,
-  coutures appariées, maillage Delaunay contraint (Delaunator + Constrainautor).
+  coutures appariées, maillage Delaunay contraint (Delaunator + Constrainautor). Pièces à couper avec
+  marges, crans et repères ; export PDF A4 tuilé, SVG 1:1, DXF AAMA.
 - **Simulation** : XPBD (étirement anisotrope, flexion isométrique de Bergou,
   couture progressive, contact SDF avec le corps, auto-collision sommet ↔ triangle). GPU (WebGPU compute, sur le device du rendu,
   coque épaisse calculée sur le GPU, sans relecture) ou CPU en repli (worker).
@@ -25,9 +26,27 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   principal max. Calcul sur GPU (avec le noyau des normales) ou CPU, lissé une fois.
   *Limite* : pour les tissés raides (denim, lin), un résidu numérique d'étirement (~0,5–1 %)
   multiplié par leur module élevé surestime la tension ; fiable pour les mailles.
-- [ ] **Marges de couture et repères** sur le patron : crans d'assemblage, droit-fil, nom des pièces.
-- [ ] **Export du patron** : SVG / PDF à l'échelle 1 (tuilé A4 imprimable), puis DXF AAMA/ASTM
-  (interopérable CLO, Gerber…).
+- [x] **Marges de couture et repères** (`lib/pattern/markings.ts`, onglet Patron « Marges et export ») :
+  marges réglables (coutures et encolure 1 cm, ourlets 2,5 cm par défaut) ajoutées hors du patron net
+  (= le patron simulé, inchangé). Coins en onglet ; coins d'ourlet **en miroir** (la marge de côté est
+  symétrisée autour de la ligne de pli de l'ourlet : une fois l'ourlet remonté, il épouse la pièce,
+  évasé sous une manche qui se resserre). Boucles du décalage retirées là où le rayon de courbure est
+  plus petit que la marge (encolure dos près de l'épaule). Crans posés à la même fraction de longueur
+  des deux côtés d'une couture (même appariement que le maillage) : simple au devant d'emmanchure, double
+  au dos, haut de tête de manche, milieux devant / dos. Droit-fil, nom, quantité à couper, marges
+  incluses. Option « au pli » : devant et dos en demi-pièces (ni coupe ni couture tracées le long du pli).
+- [x] **Export du patron** (`lib/pattern/export/`, sans dépendance) :
+  - PDF tuilé A4 (vectoriel, Helvetica standard) : page de garde avec plan d'assemblage, consignes et
+    carré test de 10 cm ; tuiles avec cadre, losanges d'alignement, nom de page et voisines ; pages
+    vides omises. Mise en page cherchée pour le minimum de pages (largeur en tuiles × pièces tournées
+    d'un quart de tour, rangement par étagères) : 14 pages + garde au pli, 20 + garde en pièces entières
+    (mesures moyennes).
+  - SVG d'une seule planche à l'échelle 1 (unités en cm), carré test inclus.
+  - DXF AAMA (R12 ASCII, mm) : un BLOCK par pièce entière, calques 1 contour de coupe + textes
+    (`Piece Name`, `Quantity`…), 2 points d'angle, 3 points de courbe, 4 crans (segments), 7 droit-fil,
+    14 ligne de couture. Validé par ezdxf (lecture stricte, audit sans erreur) ; pas encore essayé dans
+    CLO / Gerber. *À faire* : variante ASTM D6673 (crans en POINT + angle, calques 80+), demi-pièces
+    avec ligne miroir (calque 6).
 
 ## 2. Cœur de l'outil de conception
 

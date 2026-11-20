@@ -37,10 +37,22 @@ export const DEFAULT_TSHIRT: TShirtParams = { chestEase: 10, length: 0, sleeveLe
 
 export type PieceId = "front" | "back" | "sleeve+" | "sleeve-";
 
+/** Which allowance the cut line adds outside the edge (see `lib/pattern/markings.ts`). */
+export type EdgeAllowance = "seam" | "hem" | "none";
+
 export interface Edge {
   id: string;
   /** Points in loop (counter-clockwise) order. */
   pts: P2[];
+  allowance: EdgeAllowance;
+}
+
+/** Match mark on an edge: `t` is the arc-length fraction in loop order. */
+export interface Notch {
+  edge: string;
+  t: number;
+  /** 1 = front / centre, 2 = back (sewing convention). */
+  count: 1 | 2;
 }
 
 export interface Piece {
@@ -49,6 +61,13 @@ export interface Piece {
   edges: Edge[];
   /** Grain line (warp direction), for display. */
   grain: [P2, P2];
+  notches: Notch[];
+  /** How many to cut (the sleeve piece is listed twice for the simulation, cut ×2). */
+  quantity: number;
+  /** Mirror-symmetric about x = 0: the "+" edges form a half piece that can be cut on the fold. */
+  symmetric: boolean;
+  /** Where the piece's name and cutting notes go. */
+  label: P2;
 }
 
 export interface SeamSide {
@@ -65,6 +84,7 @@ export interface Seam {
 }
 
 export interface Pattern {
+  name: string;
   pieces: Piece[];
   seams: Seam[];
   /** Key dimensions, for display. */
@@ -91,16 +111,16 @@ function bodice(
   const arm = cubic(S, [sw - scoop, -sd - 0.5 * (ad - sd)], [sw - scoop + 0.15 * (wc - sw + scoop), -ad], U);
   const armUp = arm.slice().reverse(); // U → S
   const edges: Edge[] = [
-    { id: "hem+", pts: [[0, -len], H] },
-    { id: "side+", pts: [H, U] },
-    { id: "arm+", pts: armUp },
-    { id: "shoulder+", pts: [S, N] },
-    { id: "neck+", pts: neck },
-    { id: "neck-", pts: mirror(neck) },
-    { id: "shoulder-", pts: mirror([S, N]) },
-    { id: "arm-", pts: mirror(armUp) },
-    { id: "side-", pts: mirror([H, U]) },
-    { id: "hem-", pts: mirror([[0, -len], H]) },
+    { id: "hem+", pts: [[0, -len], H], allowance: "hem" },
+    { id: "side+", pts: [H, U], allowance: "seam" },
+    { id: "arm+", pts: armUp, allowance: "seam" },
+    { id: "shoulder+", pts: [S, N], allowance: "seam" },
+    { id: "neck+", pts: neck, allowance: "seam" },
+    { id: "neck-", pts: mirror(neck), allowance: "seam" },
+    { id: "shoulder-", pts: mirror([S, N]), allowance: "seam" },
+    { id: "arm-", pts: mirror(armUp), allowance: "seam" },
+    { id: "side-", pts: mirror([H, U]), allowance: "seam" },
+    { id: "hem-", pts: mirror([[0, -len], H]), allowance: "hem" },
   ];
   return { edges, armhole: polylineLength(arm) };
 }
@@ -138,19 +158,25 @@ export function draftTShirt(b: BodyMeasures, p: TShirtParams = DEFAULT_TSHIRT): 
   const Cf: P2 = [bw / 2, -ch], Cb: P2 = [-bw / 2, -ch];
   const Hf: P2 = [hw / 2, -sl], Hb: P2 = [-hw / 2, -sl];
   const sleeveEdges = (): Edge[] => [
-    { id: "capBack", pts: capBack },
-    { id: "underBack", pts: [Cb, Hb] },
-    { id: "hem", pts: [Hb, Hf] },
-    { id: "underFront", pts: [Hf, Cf] },
-    { id: "capFront", pts: capFront.slice().reverse() },
+    { id: "capBack", pts: capBack, allowance: "seam" },
+    { id: "underBack", pts: [Cb, Hb], allowance: "seam" },
+    { id: "hem", pts: [Hb, Hf], allowance: "hem" },
+    { id: "underFront", pts: [Hf, Cf], allowance: "seam" },
+    { id: "capFront", pts: capFront.slice().reverse(), allowance: "seam" },
   ];
 
-  const pieces: Piece[] = [
-    { id: "front", name: "Devant", edges: front.edges, grain: [[0, -8], [0, -len + 8]] },
-    { id: "back", name: "Dos", edges: back.edges, grain: [[0, -8], [0, -len + 8]] },
-    { id: "sleeve+", name: "Manche", edges: sleeveEdges(), grain: [[0, -2], [0, -sl + 3]] },
-    { id: "sleeve-", name: "Manche", edges: sleeveEdges(), grain: [[0, -2], [0, -sl + 3]] },
-  ];
+  // Labels sit between the grain line (centre) and the side seam, mid-way armpit → hem;
+  // on the sleeve, in the band under the cap.
+  const bodiceLabel: P2 = [-wc / 2, -(common.ad + len) / 2];
+  const sleeveLabel: P2 = [-bw / 4, -(ch + sl) / 2];
+  const bodicePiece = (id: "front" | "back", name: string, edges: Edge[]): Piece => ({
+    id, name, edges, grain: [[0, -8], [0, -len + 8]], notches: [], quantity: 1, symmetric: true, label: bodiceLabel,
+  });
+  const sleevePiece = (id: "sleeve+" | "sleeve-"): Piece => ({
+    id, name: "Manche", edges: sleeveEdges(), grain: [[0, -2], [0, -sl + 3]], notches: [], quantity: 2, symmetric: true, label: sleeveLabel,
+  });
+  const pieces: Piece[] = [bodicePiece("front", "Devant", front.edges), bodicePiece("back", "Dos", back.edges), sleevePiece("sleeve+"), sleevePiece("sleeve-")];
+  const byId = new Map(pieces.map((p) => [p.id, p]));
 
   const side = (piece: PieceId, edge: string, reverse = false): SeamSide => ({ piece, edge, reverse });
   const seams: Seam[] = [];
@@ -169,7 +195,22 @@ export function draftTShirt(b: BodyMeasures, p: TShirtParams = DEFAULT_TSHIRT): 
     );
   }
 
+  // Match marks. A seam notch sits at the same fraction t of both sides, measured in the
+  // stitching direction (the same proportional matching as the simulation mesh).
+  const notchSeam = (id: string, t: number, count: 1 | 2) => {
+    const seam = seams.find((x) => x.id === id)!;
+    for (const sd of [seam.a, seam.b]) byId.get(sd.piece)!.notches.push({ edge: sd.edge, t: sd.reverse ? 1 - t : t, count });
+  };
+  for (const s of ["+", "-"]) {
+    notchSeam(`armFront${s}`, 0.5, 1); // single notch: front armhole
+    notchSeam(`armBack${s}`, 0.5, 2); // double notch: back armhole
+  }
+  for (const id of ["front", "back"] as const)
+    byId.get(id)!.notches.push({ edge: "neck+", t: 1, count: 1 }, { edge: "hem+", t: 0, count: 1 }); // centre front / back
+  for (const id of ["sleeve+", "sleeve-"] as const) byId.get(id)!.notches.push({ edge: "capBack", t: 0, count: 1 }); // top of cap ↔ shoulder seam
+
   return {
+    name: "T-shirt col rond",
     pieces,
     seams,
     dims: { chestWidth: wc * 4, hemWidth: wh * 4, length: len, armhole: front.armhole + back.armhole, capHeight: ch, bicep: bw },

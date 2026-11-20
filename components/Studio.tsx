@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { FEMALE, MALE } from "@/lib/avatar/morphology";
 import { CADENCE } from "@/lib/avatar/motion";
+import type { ExportOptions } from "@/lib/pattern/export";
+import { DEFAULT_ALLOWANCES } from "@/lib/pattern/markings";
 import { TEXTILES, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
 import type { FitMode } from "@/lib/viewer/fitMap";
@@ -54,6 +56,7 @@ export default function Studio() {
   const [cadence, setCadence] = useState(CADENCE.default);
   const [armSpread, setArmSpread] = useState<number | null>(null);
   const [fitMode, setFitMode] = useState<FitMode | null>(null);
+  const [cutting, setCutting] = useState<ExportOptions>({ allowances: DEFAULT_ALLOWANCES, fold: true });
 
   // Fabric
   const [textileId, setTextileId] = useState(TEXTILES[0].id);
@@ -249,6 +252,8 @@ export default function Studio() {
               autoLength={garment.autoLength}
               progress={simProgress}
               onResew={garment.resew}
+              cutting={cutting}
+              onCutting={setCutting}
             />
           )}
           {tab === "tissu" && (
