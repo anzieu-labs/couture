@@ -1,0 +1,98 @@
+import { convexHullPerimeter, MeshSlicer } from "../geometry/slice";
+import { AnnyModel, type BodyShape } from "./anny";
+
+/**
+ * Tape-measure style body measurements: the mesh is cut by horizontal planes,
+ * the torso cross-section is isolated (arms/legs are separate loops in the
+ * A-pose) and its girth is the perimeter of its convex hull — like a tape
+ * that bridges concavities (e.g. between the breasts).
+ */
+
+/** Girths and stature, cm. */
+export interface Measurements {
+  stature: number;
+  bust: number;
+  waist: number;
+  hips: number;
+}
+
+export interface TorsoSection {
+  /** Convex-hull girth (m), 0 when no loop crosses the mid-plane. */
+  girth: number;
+  halfWidth: number;
+  zMin: number;
+  zMax: number;
+}
+
+/** Measurements plus the landmarks found while measuring (body frame, m). */
+export interface BodyMeasurement extends Measurements {
+  armpitY: number;
+  /** Section at bust level. */
+  chest: TorsoSection;
+}
+
+const EMPTY: TorsoSection = { girth: 0, halfWidth: 0, zMin: 0, zMax: 0 };
+
+/** Cross-section of the loop straddling the body mid-plane (x = 0) at height y. */
+export function torsoSection(slicer: MeshSlicer, y: number): TorsoSection {
+  let best: [number, number][] | null = null;
+  for (const loop of slicer.horizontal(y)) {
+    let neg = false, pos = false;
+    for (const p of loop.pts) {
+      if (p[0] < -0.01) neg = true;
+      else if (p[0] > 0.01) pos = true;
+    }
+    if (neg && pos && (!best || loop.pts.length > best.length)) best = loop.pts;
+  }
+  if (!best) return EMPTY;
+  let halfWidth = 0, zMin = Infinity, zMax = -Infinity;
+  for (const p of best) {
+    halfWidth = Math.max(halfWidth, Math.abs(p[0]));
+    zMin = Math.min(zMin, p[1]);
+    zMax = Math.max(zMax, p[1]);
+  }
+  return { girth: convexHullPerimeter(best), halfWidth, zMin, zMax };
+}
+
+function scan(slicer: MeshSlicer, y0: number, y1: number, mode: "max" | "min", steps = 16): number {
+  let best = mode === "max" ? 0 : Infinity;
+  for (let s = 0; s <= steps; s++) {
+    const g = torsoSection(slicer, y0 + ((y1 - y0) * s) / steps).girth;
+    if (g) best = mode === "max" ? Math.max(best, g) : Math.min(best, g);
+  }
+  return Number.isFinite(best) ? best : 0;
+}
+
+export function measureBody(
+  shape: BodyShape,
+  idx: ArrayLike<number>,
+  slicer = new MeshSlicer(shape.positions, idx),
+): BodyMeasurement {
+  const { positions: pos, joints: j } = shape;
+  const y = (k: string) => j[k][1];
+  const shoulderY = (y("upperarm01.L") + y("upperarm01.R")) / 2;
+  const hipJoint = (y("upperleg01.L") + y("upperleg01.R")) / 2;
+
+  // Bust: scan upwards and stop when the section suddenly widens — the arms
+  // have joined the torso loop (armpit level); any girth above would include them.
+  let chest = EMPTY, armpitY = shoulderY - 0.08, prevHalfWidth = 0;
+  const steps = 24, y0 = y("spine02");
+  for (let s = 0; s <= steps; s++) {
+    const yy = y0 + ((shoulderY - y0) * s) / steps;
+    const sec = torsoSection(slicer, yy);
+    if (!sec.girth) continue;
+    if (prevHalfWidth && sec.halfWidth > prevHalfWidth * 1.2) break;
+    prevHalfWidth = sec.halfWidth;
+    armpitY = yy;
+    if (sec.girth > chest.girth) chest = sec;
+  }
+
+  return {
+    stature: AnnyModel.stature(pos) * 100,
+    bust: chest.girth * 100,
+    waist: scan(slicer, y("spine04"), y("spine02"), "min") * 100,
+    hips: scan(slicer, hipJoint - 0.15, y("spine05") + 0.02, "max") * 100,
+    armpitY,
+    chest,
+  };
+}
