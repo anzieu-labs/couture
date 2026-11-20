@@ -62,8 +62,6 @@ export interface GarmentGeometry {
   /** Flat pattern coordinates (m), also the UVs. */
   rest: Float32Array;
   triangles: Uint32Array;
-  /** Hem / neck band weight per vertex (double layer). */
-  band: Float32Array;
   /** Fabric thickness (m). */
   thickness: number;
   /** Tensile moduli (N/m), for the fit map. */

@@ -1,7 +1,5 @@
 /** Visual thickness never goes below this (m): thinner fabrics read as paper. */
 export const MIN_THICKNESS = 0.0005;
-/** A turned hem is about three layers of fabric. */
-export const HEM_LAYERS = 3;
 
 /**
  * Static topology of the rendered cloth solid: vertices laid out as
@@ -15,14 +13,13 @@ export interface ShellTopology {
   rim: Uint32Array;
   index: Uint32Array;
   uv: Float32Array;
-  /** Half thickness per mid-surface vertex (m). */
-  halfThickness: Float32Array;
+  /** Half thickness of the solid (m). */
+  halfThickness: number;
 }
 
-export function shellTopology(rest: Float32Array, triangles: Uint32Array, band: Float32Array, thickness: number): ShellTopology {
+export function shellTopology(rest: Float32Array, triangles: Uint32Array, thickness: number): ShellTopology {
   const n = rest.length / 2;
-  const t = Math.max(MIN_THICKNESS, thickness);
-  const halfThickness = band.map((b) => (t * (1 + (HEM_LAYERS - 1) * b)) / 2);
+  const halfThickness = Math.max(MIN_THICKNESS, thickness) / 2;
 
   // Boundary edges: used by exactly one triangle.
   const seen = new Map<number, [number, number] | null>();

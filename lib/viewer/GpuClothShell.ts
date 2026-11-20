@@ -63,17 +63,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }`;
 
 const shellWGSL = /* wgsl */ `
-struct Counts { n: u32, nRim: u32, pad0: u32, pad1: u32 }
+struct Counts { n: u32, nRim: u32, halfThickness: f32, pad1: u32 }
 @group(0) @binding(0) var<storage, read> pos: array<f32>;
 @group(0) @binding(1) var<storage, read> nrm: array<f32>;
 @group(0) @binding(2) var<storage, read> rim: array<u32>;
-@group(0) @binding(3) var<storage, read> thick: array<f32>;
-@group(0) @binding(4) var<storage, read_write> outPos: array<f32>;
-@group(0) @binding(5) var<storage, read_write> outNrm: array<f32>;
-@group(0) @binding(6) var<storage, read> fit: array<f32>;
-@group(0) @binding(7) var<storage, read_write> outCol: array<f32>;
-@group(0) @binding(8) var<uniform> counts: Counts;
-@group(0) @binding(9) var<uniform> fp: FitParams;
+@group(0) @binding(3) var<storage, read_write> outPos: array<f32>;
+@group(0) @binding(4) var<storage, read_write> outNrm: array<f32>;
+@group(0) @binding(5) var<storage, read> fit: array<f32>;
+@group(0) @binding(6) var<storage, read_write> outCol: array<f32>;
+@group(0) @binding(7) var<uniform> counts: Counts;
+@group(0) @binding(8) var<uniform> fp: FitParams;
 ${fitWGSL}
 fn P(i: u32) -> vec3f { return vec3f(pos[3u * i], pos[3u * i + 1u], pos[3u * i + 2u]); }
 fn N(i: u32) -> vec3f { return vec3f(nrm[3u * i], nrm[3u * i + 1u], nrm[3u * i + 2u]); }
@@ -87,12 +86,12 @@ fn put(v: u32, p: vec3f, n: vec3f, f: f32) {
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let n = counts.n;
   if (id.x < n) {
-    // Outer and inner faces, offset by ± half the (local) thickness.
+    // Outer and inner faces, offset by ± half the thickness.
     let i = id.x;
     let p = P(i);
-    let d = N(i);
-    put(i, p + d * thick[i], d, fit[i]);
-    put(n + i, p - d * thick[i], -d, fit[i]);
+    let d = N(i) * counts.halfThickness;
+    put(i, p + d, N(i), fit[i]);
+    put(n + i, p - d, -N(i), fit[i]);
     return;
   }
   let r = id.x - n;
@@ -106,10 +105,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let nb = N(b);
   let side = normalize(cross(pb - pa, na + nb));
   let o = 2u * n + 4u * r;
-  put(o, pa + na * thick[a], side, fit[a]);
-  put(o + 1u, pb + nb * thick[b], side, fit[b]);
-  put(o + 2u, pb - nb * thick[b], side, fit[b]);
-  put(o + 3u, pa - na * thick[a], side, fit[a]);
+  let h = counts.halfThickness;
+  put(o, pa + na * h, side, fit[a]);
+  put(o + 1u, pb + nb * h, side, fit[b]);
+  put(o + 2u, pb - nb * h, side, fit[b]);
+  put(o + 3u, pa - na * h, side, fit[a]);
 }`;
 
 /**
@@ -133,7 +133,6 @@ export class GpuClothShell {
     renderer: THREE.WebGPURenderer,
     rest: Float32Array,
     triangles: Uint32Array,
-    band: Float32Array,
     thickness: number,
     tensile: Tensile,
     positions: GPUBuffer,
@@ -143,7 +142,7 @@ export class GpuClothShell {
     const device: GPUDevice = backend.device;
     this.device = device;
     this.tensile = tensile;
-    const topo = shellTopology(rest, triangles, band, thickness);
+    const topo = shellTopology(rest, triangles, thickness);
     const { n, rim } = topo;
     const nRim = rim.length / 2;
 
@@ -180,9 +179,11 @@ export class GpuClothShell {
       return buf;
     };
     const tris = upload(triangles), startBuf = upload(start), listBuf = upload(list);
-    const rimBuf = upload(rim), thick = upload(topo.halfThickness);
+    const rimBuf = upload(rim);
     const nrm = upload(new Float32Array(3 * n));
-    const counts = upload(new Uint32Array([n, nRim, 0, 0]), GPUBufferUsage.UNIFORM);
+    const countData = new Uint32Array([n, nRim, 0, 0]);
+    new Float32Array(countData.buffer)[2] = topo.halfThickness; // read as f32 by the shell pass only
+    const counts = upload(countData, GPUBufferUsage.UNIFORM);
     const restInv = upload(restInverses(rest, triangles));
     const fit = upload(new Float32Array(n));
     const smoothed = upload(new Float32Array(n));
@@ -199,7 +200,7 @@ export class GpuClothShell {
     };
     this.normals = stage(normalsWGSL, [positions, tris, startBuf, listBuf, nrm, restInv, fit, counts, this.fitParams], n);
     this.smooth = stage(smoothWGSL, [fit, tris, startBuf, listBuf, smoothed, counts], n);
-    this.shell = stage(shellWGSL, [positions, nrm, rimBuf, thick, outPos, outNrm, smoothed, outCol, counts, this.fitParams], n + nRim);
+    this.shell = stage(shellWGSL, [positions, nrm, rimBuf, outPos, outNrm, smoothed, outCol, counts, this.fitParams], n + nRim);
   }
 
   /** Selects what the fit-map colours show (applied at the next `encode`). */

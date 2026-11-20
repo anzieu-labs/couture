@@ -19,12 +19,7 @@ export interface GarmentMesh {
   pieceIds: PieceId[];
   /** Stitched vertex pairs. */
   seams: Uint32Array;
-  /** 1 inside the turned hem / neck band along free (unsewn) edges, 0 elsewhere. */
-  band: Float32Array;
 }
-
-/** Depth of the turned-up band along free edges (cm). */
-const bandDepth = (edgeId: string) => (edgeId.startsWith("neck") ? 1.5 : 2.2);
 
 function distToSegment(p: P2, a: P2, b: P2): number {
   const dx = b[0] - a[0], dy = b[1] - a[1];
@@ -89,23 +84,16 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
   const rest: number[] = [];
   const tris: number[] = [];
   const pieceOf: number[] = [];
-  const band: number[] = [];
   const edgeVerts = new Map<string, number[]>();
 
   pattern.pieces.forEach((piece, pi) => {
     const base = rest.length / 2;
     const boundary: P2[] = [];
     const local = new Map<string, number[]>();
-    const freeEdges: { pts: P2[]; depth: number; box: [number, number, number, number] }[] = [];
     for (const e of piece.edges) {
       const seamCount = counts.get(key(piece.id, e.id));
       const n = seamCount ?? Math.max(1, Math.round(polylineLength(e.pts) / spacing));
       const pts = resample(e.pts, n);
-      if (seamCount === undefined) {
-        const depth = bandDepth(e.id), r = depth + 0.5;
-        const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
-        freeEdges.push({ pts, depth, box: [Math.min(...xs) - r, Math.min(...ys) - r, Math.max(...xs) + r, Math.max(...ys) + r] });
-      }
       const ids: number[] = [];
       pts.forEach((p, i) => {
         if (i === pts.length - 1) return; // shared with the next edge
@@ -163,15 +151,6 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
     for (const p of points) {
       rest.push(p[0] / 100, p[1] / 100);
       pieceOf.push(pi);
-      let w = 0;
-      for (const { pts, depth, box } of freeEdges) {
-        if (p[0] < box[0] || p[0] > box[2] || p[1] < box[1] || p[1] > box[3]) continue;
-        for (let i = 1; i < pts.length; i++) {
-          const d = distToSegment(p, pts[i - 1], pts[i]);
-          w = Math.max(w, d <= depth ? 1 : Math.max(0, 1 - (d - depth) / 0.5));
-        }
-      }
-      band.push(w);
     }
   });
 
@@ -191,6 +170,5 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
     piece: Uint8Array.from(pieceOf),
     pieceIds: pattern.pieces.map((p) => p.id),
     seams: new Uint32Array(seams),
-    band: new Float32Array(band),
   };
 }

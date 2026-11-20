@@ -5,7 +5,7 @@ import { shellTopology, type ShellTopology } from "./shellTopology";
 /**
  * CPU version of the rendered cloth solid (used with the CPU solver): an outer
  * and an inner face offset by ± thickness / 2 along the vertex normals, plus a
- * rim along every boundary edge; hem / neck bands are thicker (turned layers).
+ * rim along every boundary edge.
  * Triangles must be oriented with their normals pointing away from the body.
  * Also fills fit-map colours (see fitMap.ts).
  */
@@ -24,8 +24,8 @@ export class ClothShell {
   private fitMode: FitMode = "tension";
   private last: Float32Array | null = null;
 
-  constructor(rest: Float32Array, triangles: Uint32Array, band: Float32Array, thickness: number, private readonly tensile: Tensile) {
-    this.topo = shellTopology(rest, triangles, band, thickness);
+  constructor(rest: Float32Array, triangles: Uint32Array, thickness: number, private readonly tensile: Tensile) {
+    this.topo = shellTopology(rest, triangles, thickness);
     this.tris = triangles;
     this.normals = new Float32Array(this.topo.n * 3);
     this.position = new THREE.BufferAttribute(new Float32Array(this.topo.vertexCount * 3), 3);
@@ -52,7 +52,7 @@ export class ClothShell {
   /** Rebuilds the solid from the simulated mid-surface positions. */
   update(mid: Float32Array) {
     this.last = mid;
-    const { n, rim, halfThickness: ht } = this.topo;
+    const { n, rim, halfThickness: h } = this.topo;
     const tris = this.tris;
     const nrm = this.normals.fill(0);
     const fit = this.fit.fill(0);
@@ -84,7 +84,7 @@ export class ClothShell {
     const C = this.color.array as Float32Array;
     const rgb = [0, 0, 0];
     for (let i = 0; i < n; i++) {
-      const v = 3 * i, w = 3 * (n + i), h = ht[i];
+      const v = 3 * i, w = 3 * (n + i);
       fitColor(smoothed[i], this.fitMode, rgb);
       for (let k = 0; k < 3; k++) {
         P[v + k] = mid[v + k] + nrm[v + k] * h;

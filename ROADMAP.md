@@ -9,7 +9,7 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   poitrine, taille, hanches), 18 ajustements de couture.
 - **Patron** : t‑shirt col rond tracé depuis les mesures du corps (`lib/pattern/tshirt.ts`), 4 pièces,
   coutures appariées, maillage Delaunay contraint (Delaunator + Constrainautor).
-- **Simulation** : XPBD (étirement anisotrope, flexion isométrique de Bergou, ourlets doublés,
+- **Simulation** : XPBD (étirement anisotrope, flexion isométrique de Bergou,
   couture progressive, contact SDF avec le corps, auto-collision sommet ↔ triangle). GPU (WebGPU compute, sur le device du rendu,
   coque épaisse calculée sur le GPU, sans relecture) ou CPU en repli (worker).
 - **Tissus** : 10 textiles procéduraux avec propriétés physiques (grammage, rigidité en flexion,
@@ -34,7 +34,9 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
 - [ ] **Éditeur de patron 2D interactif** : déplacer les points, modifier les courbes (encolure,
   emmanchure), recouture automatique en 3D.
 - [ ] **Variantes du t‑shirt** : col V, manches longues, oversize / cintré.
-- [ ] **Bord-côte d'encolure** : vraie pièce cousue (aujourd'hui une simple bande renforcée).
+- [ ] **Finitions des bords libres** (choix par bord, au design) : ourlet replié, bord-côte cousu, biais,
+  parementure. Aujourd'hui tous les bords sont francs. Un premier essai d'ourlet automatique sur tous les bords
+  (masse ×2, flexion ×4, épaisseur ×3) a été retiré : voir l'historique git.
 
 ## 3. Réalisme de la simulation
 

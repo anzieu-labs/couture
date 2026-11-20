@@ -11,7 +11,6 @@ import { buildSelfCollision, type SelfCollisionModel } from "./selfCollision";
  *    state the bending energy of the two triangles around an edge is
  *    (3B / (A0 + A1)) · |Σ Kᵢ xᵢ|², with constant cotangent weights Kᵢ: a
  *    linear, singularity-free constraint driven by the bending rigidity B (N·m);
- *  - hems / neck band: double layer → twice the mass, four times the rigidity;
  *  - sewing: seam vertex pairs pulled together, rest length ramping to 0;
  *  - self-collisions: see selfCollision.ts.
  *
@@ -61,7 +60,6 @@ export const DEFAULT_CLOTH: ClothParams = {
 /** Light load used to turn "elongation under light load" into a tensile modulus (N/m). */
 const REFERENCE_LOAD = 20;
 const MAX_TENSILE = 2e4;
-const HEM_BENDING_FACTOR = 4;
 
 /** Tensile moduli (N/m) along the warp (pattern y) and the weft (pattern x). */
 export function tensileModuli(p: ClothParams): { warp: number; weft: number } {
@@ -153,13 +151,13 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
   const area = (a: number, b: number, c: number) =>
     Math.abs((X(b) - X(a)) * (Y(c) - Y(a)) - (X(c) - X(a)) * (Y(b) - Y(a))) / 2;
 
-  // Masses (hem bands are a double layer).
+  // Masses.
   const mass = new Float32Array(n);
   for (let t = 0; t < tri.length; t += 3) {
     const m = (area(tri[t], tri[t + 1], tri[t + 2]) * p.density) / 3;
     for (let k = 0; k < 3; k++) mass[tri[t + k]] += m;
   }
-  const invMass = mass.map((m, i) => (m > 0 ? 1 / (m * (1 + mesh.band[i])) : 0));
+  const invMass = mass.map((m) => (m > 0 ? 1 / m : 0));
 
   // Edge → opposite vertices and adjacent area.
   const adj = new Map<number, { opp: number[]; area: number }>();
@@ -203,8 +201,7 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
     const c01 = cot(a, b, c), c02 = cot(a, b, d), c03 = cot(b, a, c), c04 = cot(b, a, d);
     bIdx.push(a, b, c, d);
     bK.push(c03 + c04, c01 + c02, -c01 - c03, -c02 - c04);
-    const hem = (mesh.band[a] + mesh.band[b] + mesh.band[c] + mesh.band[d]) / 4;
-    bComp.push(A / (3 * p.bending * (1 + (HEM_BENDING_FACTOR - 1) * hem)));
+    bComp.push(A / (3 * p.bending));
   }
 
   const seamStart = new Float32Array(mesh.seams.length / 2);

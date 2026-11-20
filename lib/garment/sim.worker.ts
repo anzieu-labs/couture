@@ -76,7 +76,6 @@ async function dress(req: DressRequest) {
   const geometry: GarmentGeometry = {
     rest: mesh.rest,
     triangles: mesh.triangles,
-    band: mesh.band,
     thickness: params.thickness,
     tensile: tensileModuli(params),
     initial,

@@ -363,7 +363,7 @@ export class GarmentViewer {
 
   /** CPU mode: the worker simulates and streams positions; the shell is built here. */
   private showCpuGarment(g: GarmentGeometry) {
-    const shell = new ClothShell(g.rest, g.triangles, g.band, g.thickness, g.tensile);
+    const shell = new ClothShell(g.rest, g.triangles, g.thickness, g.tensile);
     shell.update(g.initial);
     this.animator.reset(); // the worker owns the timeline now
     this.cpuBones = null;
@@ -389,7 +389,7 @@ export class GarmentViewer {
     if (!device) return;
     const solver = new GpuClothSolver(device, model, g.initial, sdf, this.skeleton.count);
     this.restartMotion(model.params.sewTime);
-    const shell = new GpuClothShell(this.renderer, g.rest, g.triangles, g.band, g.thickness, g.tensile, solver.positions);
+    const shell = new GpuClothShell(this.renderer, g.rest, g.triangles, g.thickness, g.tensile, solver.positions);
     const rebuildShell = () => {
       const encoder = device.createCommandEncoder();
       shell.encode(encoder);
