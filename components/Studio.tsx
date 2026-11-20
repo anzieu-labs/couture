@@ -163,27 +163,6 @@ export default function Studio() {
         )}
 
         <div className="absolute inset-x-0 bottom-4 flex flex-col items-center gap-2 px-4 md:bottom-6">
-          {ready && (
-            <div className="flex items-center gap-1 rounded-full border border-line bg-white/80 p-1 shadow-sm backdrop-blur" role="group" aria-label="Mouvement du mannequin">
-              <button
-                type="button"
-                onClick={() => setWalking((w) => !w)}
-                aria-pressed={walking}
-                title="Marche sur place (démarre une fois le vêtement cousu)"
-                className="rounded-full px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-ink aria-pressed:bg-ink aria-pressed:text-white"
-              >
-                Marche
-              </button>
-              <button
-                type="button"
-                onClick={turn}
-                title="Un tour complet sur le socle"
-                className="rounded-full px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-ink active:bg-ink active:text-white"
-              >
-                Tour
-              </button>
-            </div>
-          )}
           <div className="flex items-center gap-1 rounded-full border border-line bg-white/80 p-1 shadow-sm backdrop-blur">
             {VIEW_LABELS.map((v) => (
               <button

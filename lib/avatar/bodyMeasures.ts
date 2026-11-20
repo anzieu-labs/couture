@@ -4,7 +4,11 @@ import type { BodyShape } from "./anny";
 import { torsoSection, type BodyMeasurement } from "./measure";
 
 export interface TorsoFrame {
-  /** Half width / half depth / centre depth of the torso at chest level (m). */
+  /**
+   * Half width / half depth / centre depth of the box enclosing the torso from
+   * the chest down past the hips (m): the garment is wrapped around it before
+   * sewing, so it must clear the buttocks and the belly as well as the bust.
+   */
   halfWidth: number;
   halfDepth: number;
   centerZ: number;
@@ -14,6 +18,10 @@ export interface TorsoFrame {
   /** Mean radius of the upper arm (m). */
   upperArmRadius: number;
 }
+
+/** Depth of the torso envelope below the hip joints (m), and its number of cuts. */
+const ENVELOPE_BELOW_HIP = 0.25;
+const ENVELOPE_CUTS = 24;
 
 /** Measurements needed to draft and place a top garment. */
 export function measureForPattern(
@@ -38,6 +46,18 @@ export function measureForPattern(
   };
 
   const upperArm = (arm("L") + arm("R")) / 2;
+
+  // Torso envelope, from the chest down to below the longest usual hem (under
+  // the crotch no loop straddles the mid-plane: those cuts are skipped).
+  let halfWidth = body.chest.halfWidth, zMin = body.chest.zMin, zMax = body.chest.zMax;
+  const top = body.armpitY - 0.03, bottom = hipY - ENVELOPE_BELOW_HIP;
+  for (let s = 0; s <= ENVELOPE_CUTS; s++) {
+    const c = torsoSection(slicer, top + ((bottom - top) * s) / ENVELOPE_CUTS);
+    if (!c.girth) continue;
+    halfWidth = Math.max(halfWidth, c.halfWidth);
+    zMin = Math.min(zMin, c.zMin);
+    zMax = Math.max(zMax, c.zMax);
+  }
   return {
     measures: {
       bust: body.bust,
@@ -50,9 +70,9 @@ export function measureForPattern(
       hpsToHip: (hpsY - hipY) * 100,
     },
     torso: {
-      halfWidth: body.chest.halfWidth,
-      halfDepth: (body.chest.zMax - body.chest.zMin) / 2,
-      centerZ: (body.chest.zMax + body.chest.zMin) / 2,
+      halfWidth,
+      halfDepth: (zMax - zMin) / 2,
+      centerZ: (zMax + zMin) / 2,
       hpsY,
       armpitY: body.armpitY,
       upperArmRadius: upperArm / (2 * Math.PI),

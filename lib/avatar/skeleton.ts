@@ -30,6 +30,8 @@ export interface Pose {
    * null: no grounding.
    */
   ground: Partial<Record<string, number>> | null;
+  /** Translation of the whole body (m), e.g. the lateral weight shift of the walk; applied before grounding. */
+  offset?: Vec3 | null;
 }
 
 // --- Rotations -------------------------------------------------------------------
@@ -156,6 +158,9 @@ export class Skeleton {
         W[o + 4 * i + 3] += W[q + 4 * i + 3];
       }
     }
+    if (pose.offset)
+      for (let k = 0; k < this.count; k++)
+        for (let i = 0; i < 3; i++) W[k * BONE_STRIDE + 4 * i + 3] += pose.offset[i];
     if (pose.ground) {
       // Weighted mean of the lifts that put each carrying foot's lowest sole point on the floor.
       let lift = 0, total = 0;

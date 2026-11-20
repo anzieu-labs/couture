@@ -19,7 +19,9 @@ import { axisAngle, identityBones, type Mat3, mul3, type Pose, rotX, rotY, rotZ,
  * leg lengths of any morphology, both feet touch the floor together: driving
  * the joints with fixed angle curves made one foot float while the other sank,
  * and the body bounced from one to the other — a hop at every step. Plus
- * pelvis rotation and list, counter-rotation of the thorax and arm swing.
+ * pelvis rotation and list (cancelled at the hips and the lumbar spine: the
+ * legs stay vertical, the thorax upright), a small weight shift over the stance
+ * foot (the feet staying put), counter-rotation of the thorax and arm swing.
  * Times are seconds on the caller's clock.
  */
 
@@ -61,6 +63,10 @@ const CLEARANCE = 0.08;
 const PITCH = { strike: 10, toeOff: -25 };
 /** The front leg reaches the floor with the knee slightly bent: fraction of the leg length. */
 const REACH = 0.985;
+/** Lateral shift of the body towards the stance foot, at its mid-stance (m). */
+const SWAY = 0.015;
+/** Share of the pelvic list cancelled by each lower spine joint (sums to 1: the thorax stays upright over the pelvis). */
+const LIST_SPINE: [string, number][] = [["spine05", 0.4], ["spine04", 0.3], ["spine03", 0.2], ["spine02", 0.1]];
 
 /** Ankle path of a leg at phase p of its cycle (0 = heel strike): forward offset (× stride), lift (× clearance), foot pitch (deg). */
 function footPath(p: number): { z: number; lift: number; pitch: number } {
@@ -312,15 +318,27 @@ export class Animator {
     };
 
     const level = t > (this.walk?.rampStart ?? Infinity) ? smoothstep(this.walkLevel(t)) : 0;
+    let offset: Vec3 | null = null;
     if (level > 0) {
       const w = this.walk!;
       const phase = w.phase0 + (t - w.time0) / this.period;
       const c = Math.cos(2 * Math.PI * phase), sn = Math.sin(2 * Math.PI * phase);
       const k = level * this.strideAt(t) * DEG;
       // Pelvis: rotation (swing side forward) and list (swing side drops); thorax counter-rotates.
+      // The list is the pelvis's alone: the lumbar spine and the hips cancel it, so that the
+      // thorax stays upright and the legs vertical (inheriting it, the feet slid sideways on the
+      // floor and the torso swayed over them, away from the stance foot). The hips cancel the
+      // rotation of the pelvis too: the feet keep pointing forward and stay put.
       const yaw = -4 * c * k, list = 3 * sn * k;
-      set("root", mul3(rotY(yaw), rotZ(list)));
-      for (const b of SPINE) set(b, mul3(rotY((7 * c * k) / SPINE.length), rotZ(-list / SPINE.length)));
+      const pelvis = mul3(rotY(yaw), rotZ(list));
+      set("root", pelvis);
+      for (const b of SPINE) set(b, rotY((7 * c * k) / SPINE.length));
+      for (const [b, share] of LIST_SPINE) set(b, rotZ(-share * list));
+      // Weight shift: the body moves over the stance foot (left at its mid-stance, phase 0.3),
+      // the feet staying where they are on the floor.
+      const shift = SWAY * level * Math.sin(2 * Math.PI * (phase - 0.05));
+      offset = [shift, 0, 0];
+      const root = s.head("root");
       // Pelvis drop at heel strike, so that the front leg reaches the floor.
       const stride = STRIDE * this.strideAt(t) * level;
       let drop = 0;
@@ -336,11 +354,19 @@ export class Animator {
         const f = footPath(p);
         const pitch = f.pitch * level * DEG;
         const [ty, tz] = this.ankleTarget(leg, f.z * stride, f.lift * CLEARANCE * level, pitch, floor);
-        const [hip, knee] = legIK(leg, ty, tz);
-        // Thigh flexed in the sagittal plane, then brought in (the rest pose stands with feet apart).
-        set(`upperleg01.${side}`, mul3(rotZ(-sign * LEG_ADDUCTION * level), rotX(hip)));
+        // Hip displacement by the pelvis (the list raises the stance hip and lowers the swing one).
+        const r = [leg.hip[0] - root[0], leg.hip[1] - root[1], leg.hip[2] - root[2]];
+        const d = [0, 1, 2].map((i) => pelvis[3 * i] * r[0] + pelvis[3 * i + 1] * r[1] + pelvis[3 * i + 2] * r[2] - r[i]);
+        const hy = ty - d[1];
+        const [hip, knee] = legIK(leg, hy, tz - d[2]);
+        // Thigh flexed in the sagittal plane, then brought in (the rest pose stands with feet apart)
+        // and tilted against the weight shift (the ankle, |hy| below the hip, stays put); the
+        // rotation of the pelvis cancelled.
+        const roll = -sign * LEG_ADDUCTION * level - Math.asin((shift + d[0]) / Math.max(0.1, -hy));
+        set(`upperleg01.${side}`, mul3(rotZ(-list), mul3(rotY(-yaw), mul3(rotZ(roll), rotX(hip)))));
         set(`lowerleg01.${side}`, rotX(knee));
-        set(`foot.${side}`, rotX(-pitch - hip - knee));
+        // Pitch only: the sole stays flat across (no roll from the thigh).
+        set(`foot.${side}`, mul3(rotX(-hip - knee), mul3(rotZ(-roll), rotX(-pitch))));
         // The arm swings with the opposite leg (swing > 0: arm forward, elbow a little more bent);
         // the elbow straightens from the rest pose, whose forearms point forward.
         const swing = -Math.cos(2 * Math.PI * p);
@@ -359,7 +385,7 @@ export class Animator {
     if (this.turn && t > this.turn.start && t < this.turnEnd)
       set("root", rotY(2 * Math.PI * smootherstep((t - this.turn.start) / TURN_TIME)));
 
-    const pose: Pose = { rotations: rot, ground: null };
+    const pose: Pose = { rotations: rot, ground: null, offset };
     if (level > 0) {
       const w = this.walk!;
       const phase = w.phase0 + (t - w.time0) / this.period;

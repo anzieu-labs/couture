@@ -2,7 +2,7 @@ import { yearsToAnnyAge, type LocalChanges, type Phenotype } from "./anny";
 
 /** Morphology as edited in the UI (human units where it makes sense). */
 export interface Morphology {
-  gender: number; // 0 = homme, 1 = femme
+  gender: number; // 0 = homme, 1 = femme (the UI offers either, no blend)
   ageYears: number;
   statureCm: number;
   weight: number;
@@ -47,7 +47,6 @@ export interface SliderDef {
 const pct = (v: number) => `${Math.round(v * 100)} %`;
 
 export const MORPHOLOGY_SLIDERS: SliderDef[] = [
-  { key: "gender", label: "Morphotype", min: 0, max: 1, step: 0.01, ends: ["Homme", "Androgyne", "Femme"] },
   { key: "statureCm", label: "Stature", min: 150, max: 200, step: 1, format: (v) => `${v} cm` },
   { key: "ageYears", label: "Âge", min: 18, max: 80, step: 1, format: (v) => `${v} ans` },
   { key: "weight", label: "Corpulence", min: 0, max: 1, step: 0.01, ends: ["Mince", "Moyenne", "Forte"] },

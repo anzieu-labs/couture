@@ -20,6 +20,9 @@ interface Props {
   fitting: boolean;
 }
 
+/** Sliders shown for a woman only. */
+const FEMALE_ONLY = new Set(["cupsize", "firmness"]);
+
 function sliderDisplay(s: SliderDef, v: number): string {
   if (s.format) return s.format(v);
   if (s.ends) return v < 0.35 ? s.ends[0] : v > 0.65 ? s.ends[2] : s.ends[1];
@@ -50,20 +53,21 @@ export function MorphologyPanel(props: Props) {
       </Section>
 
       <Section title="Silhouette">
-        <div className="mb-4 flex gap-2">
+        <div className="mb-4 inline-flex gap-1 rounded-full border border-line bg-white/60 p-1" role="group" aria-label="Morphotype">
           {Object.entries(presets).map(([name, preset]) => (
             <button
               key={name}
               type="button"
-              onClick={() => onPreset(preset)}
-              className="rounded-full border border-line bg-white/60 px-3 py-1 text-xs font-medium text-ink transition-colors hover:border-muted"
+              onClick={() => preset.gender !== value.gender && onPreset(preset)}
+              aria-pressed={preset.gender === value.gender}
+              className="rounded-full px-3 py-1 text-xs font-medium text-muted transition-colors hover:text-ink aria-pressed:bg-ink aria-pressed:text-white"
             >
               {name}
             </button>
           ))}
         </div>
         <div className="space-y-4">
-          {MORPHOLOGY_SLIDERS.map((s) => (
+          {MORPHOLOGY_SLIDERS.filter((s) => !(value.gender < 0.5 && FEMALE_ONLY.has(s.key))).map((s) => (
             <RangeField
               key={s.key}
               label={s.label}
