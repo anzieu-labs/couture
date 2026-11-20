@@ -22,7 +22,8 @@ export function useViewer(container: RefObject<HTMLDivElement | null>) {
         if (cancelled) return v.dispose();
         viewer = v;
         viewerRef.current = v;
-        v.onSimProgress = setSimProgress;
+        // Called every frame: keep whole percents only, or the whole studio re-renders at 60 Hz.
+        v.onSimProgress = (p) => setSimProgress(Math.floor(p * 100) / 100);
         v.onSimBackend = setSimBackend;
         setBackend(v.backend);
         setStatus("ready");

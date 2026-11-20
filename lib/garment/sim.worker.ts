@@ -53,23 +53,62 @@ let gpuModel: { id: number; model: ClothModel } | null = null;
 const post = (msg: WorkerResponse, transfer: Transferable[] = []) => ctx.postMessage(msg, transfer);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function dress(req: DressRequest) {
-  const { id, mode, pattern, body, torso } = req;
-  const mesh = meshPattern(pattern, SPACING[mode]);
-  const initial = placeGarment(mesh, { positions: body.positions, joints: body.joints }, torso);
+/** Hands' collision offset (m): about a finger's thickness, fills the gaps between fingers. */
+const HAND_INFLATE = 0.012;
+/** Room below the garment's starting position for it to fall into (m). */
+const DEFAULT_FALL = 0.25;
+/** Cell budget of the collision field: past it the grid gets coarser. */
+const MAX_SDF_CELLS = 1.5e6;
 
-  // Collision field around the garment's working volume (+ room to fall).
+/**
+ * Collision field box: the garment's working volume (+ room to fall), clipped to
+ * the body's own box (outside it nothing can be hit: the field reads "far"). Cell
+ * size 1 cm, coarser if the volume is large (a long cape falls the body's height).
+ */
+function collisionBox(initial: Float32Array, body: Float32Array, fall: number) {
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  const bMin: [number, number, number] = [Infinity, Infinity, Infinity];
+  const bMax: [number, number, number] = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < initial.length; i += 3)
     for (let a = 0; a < 3; a++) {
       min[a] = Math.min(min[a], initial[i + a] - 0.1);
       max[a] = Math.max(max[a], initial[i + a] + 0.1);
     }
-  min[1] -= 0.25;
-  const sdf = new BodySdf(body.positions, body.normals, min, max, 0.01, 0.05, body.skin);
+  for (let i = 0; i < body.length; i += 3)
+    for (let a = 0; a < 3; a++) {
+      bMin[a] = Math.min(bMin[a], body[i + a] - 0.12);
+      bMax[a] = Math.max(bMax[a], body[i + a] + 0.12);
+    }
+  min[1] -= fall;
+  for (let a = 0; a < 3; a++) {
+    min[a] = Math.max(min[a], bMin[a]);
+    max[a] = Math.min(max[a], bMax[a]);
+  }
+  const volume = (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
+  const h = Math.max(0.01, Math.cbrt(volume / MAX_SDF_CELLS));
+  return { min, max, h };
+}
+
+async function dress(req: DressRequest) {
+  const { id, mode, pattern, body, torso } = req;
+  const mesh = meshPattern(pattern, SPACING[mode] * (pattern.sim?.spacingScale ?? 1));
+  const initial = placeGarment(mesh, { positions: body.positions, joints: body.joints }, torso, pattern.kind);
+  const { min, max, h } = collisionBox(initial, body.positions, pattern.sim?.fallRoom ?? DEFAULT_FALL);
+  // Hands as mittens: fingers are thinner than a cloth triangle (see BodySdf).
+  const hands = ["wrist.L", "wrist.R"].map((l) => body.rig.labels.indexOf(l)).filter((i) => i >= 0);
+  const sdf = new BodySdf(body.positions, body.normals, min, max, h, 0.05, body.skin, { joints: hands, offset: HAND_INFLATE });
   orientOutward(mesh, initial, sdf);
-  const params = { ...DEFAULT_CLOTH, substeps: SUBSTEPS[mode], selfInterval: SELF_INTERVAL[mode], ...req.cloth };
+  const hints = pattern.sim ?? {};
+  const params: ClothParams = {
+    ...DEFAULT_CLOTH,
+    substeps: SUBSTEPS[mode],
+    selfInterval: SELF_INTERVAL[mode],
+    ...req.cloth,
+    ...(hints.damping !== undefined && { damping: hints.damping }),
+    ...(hints.duration !== undefined && { duration: hints.duration }),
+    ...(hints.settleTime !== undefined && { settleTime: hints.settleTime }),
+  };
   const model = buildClothModel(mesh, initial, params);
   if (id !== current) return;
 
@@ -90,7 +129,7 @@ async function dress(req: DressRequest) {
   post({ type: "mesh", id, ...geometry });
   const skeleton = new Skeleton(body.rig.labels, body.rig.parents, body.joints, body.positions, body.skin);
   const animator = new Animator(skeleton);
-  animator.holdUntil(params.sewTime + MOTION_DELAY);
+  animator.holdUntil(params.sewTime + params.settleTime + MOTION_DELAY);
   animator.setCadence(req.motion.cadence, 0);
   animator.setArmSpread(req.motion.arms, 0);
   if (req.motion.walking) animator.setWalking(true, 0);

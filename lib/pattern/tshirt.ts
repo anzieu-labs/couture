@@ -1,4 +1,5 @@
 import { cubic, polylineLength, type P2 } from "./curves";
+import { KAPPA, mirror, NO_EDITS, PointSet, type BodyMeasures, type Edge, type Handle, type Pattern, type PatternEdits, type Piece, type PieceId, type Seam, type SeamSide } from "./types";
 
 /**
  * Parametric crew-neck t-shirt block drafted from body measurements (cm).
@@ -7,20 +8,6 @@ import { cubic, polylineLength, type P2 } from "./curves";
  * shoulder (HPS) level on the centre line. Sleeves: x across the width
  * (x > 0 = front half), y down the arm from the top of the cap.
  */
-
-export interface BodyMeasures {
-  bust: number;
-  waist: number;
-  hips: number;
-  neck: number;
-  upperArm: number;
-  /** Distance between shoulder points (garment shoulder width). */
-  shoulderWidth: number;
-  /** Vertical distance HPS → armpit. */
-  hpsToArmpit: number;
-  /** Vertical distance HPS → hip joint (sets the default length). */
-  hpsToHip: number;
-}
 
 export interface TShirtParams {
   /** Total chest ease (cm); negative for close-fitting knits. */
@@ -35,83 +22,33 @@ export interface TShirtParams {
 
 export const DEFAULT_TSHIRT: TShirtParams = { chestEase: 10, length: 0, sleeveLength: 21, sleeveEase: 8 };
 
-export type PieceId = "front" | "back" | "sleeve+" | "sleeve-";
-
-/** Which allowance the cut line adds outside the edge (see `lib/pattern/markings.ts`). */
-export type EdgeAllowance = "seam" | "hem" | "none";
-
-export interface Edge {
-  id: string;
-  /** Points in loop (counter-clockwise) order. */
-  pts: P2[];
-  allowance: EdgeAllowance;
-}
-
-/** Match mark on an edge: `t` is the arc-length fraction in loop order. */
-export interface Notch {
-  edge: string;
-  t: number;
-  /** 1 = front / centre, 2 = back (sewing convention). */
-  count: 1 | 2;
-}
-
-export interface Piece {
-  id: PieceId;
-  name: string;
-  edges: Edge[];
-  /** Grain line (warp direction), for display. */
-  grain: [P2, P2];
-  notches: Notch[];
-  /** How many to cut (the sleeve piece is listed twice for the simulation, cut ×2). */
-  quantity: number;
-  /** Mirror-symmetric about x = 0: the "+" edges form a half piece that can be cut on the fold. */
-  symmetric: boolean;
-  /** Where the piece's name and cutting notes go. */
-  label: P2;
-}
-
-export interface SeamSide {
-  piece: PieceId;
-  edge: string;
-  /** Traverse the edge against the loop order. */
-  reverse: boolean;
-}
-
-export interface Seam {
-  id: string;
-  a: SeamSide;
-  b: SeamSide;
-}
-
-export interface Pattern {
-  name: string;
-  pieces: Piece[];
-  seams: Seam[];
-  /** Key dimensions, for display. */
-  dims: { chestWidth: number; hemWidth: number; length: number; armhole: number; capHeight: number; bicep: number };
-}
-
-const mirror = (pts: P2[]): P2[] => pts.map(([x, y]) => [-x, y] as P2).reverse();
-
 function bodice(
   kind: "front" | "back",
   m: { nw: number; nd: number; sw: number; sd: number; wc: number; wh: number; ad: number; len: number },
-): { edges: Edge[]; armhole: number } {
+  edits: PatternEdits,
+): { edges: Edge[]; armhole: number; handles: Handle[]; U: P2; H: P2; CH: P2 } {
   const { nw, nd, sw, sd, wc, wh, ad, len } = m;
-  const N: P2 = [nw, 0], S: P2 = [sw, -sd], U: P2 = [wc, -ad], H: P2 = [wh, -len];
-  // Neckline: quarter ellipse, vertical at the shoulder, horizontal at the centre.
-  const neck: P2[] = [];
-  for (let i = 0; i <= 24; i++) {
-    const phi = (i / 24) * (Math.PI / 2);
-    neck.push([nw * Math.cos(phi), -nd * Math.sin(phi)]);
-  }
+  const P = new PointSet(kind, kind, edits);
+  const N0: P2 = [nw, 0], CN0: P2 = [0, -nd], S0: P2 = [sw, -sd], U0: P2 = [wc, -ad];
+  const N = P.anchor("N", "Encolure · épaule", N0);
+  const CN = P.anchor("CN", "Milieu d'encolure", CN0, "vertical");
+  // Neckline: a quarter ellipse (as a cubic), vertical at the shoulder, horizontal at the centre.
+  const n1 = P.control("n1", "Courbe d'encolure", [nw, -KAPPA * nd], N0, N);
+  const n2 = P.control("n2", "Courbe d'encolure", [KAPPA * nw, -nd], CN0, CN, "horizontal");
+  const S = P.anchor("S", "Point d'épaule", S0);
+  const U = P.anchor("U", "Dessous de bras", U0);
   // Armhole: drops almost vertically from the shoulder (cross-chest / cross-back
   // point slightly inside), then turns out to the underarm.
   const scoop = kind === "front" ? 1.8 : 1.0;
-  const arm = cubic(S, [sw - scoop, -sd - 0.5 * (ad - sd)], [sw - scoop + 0.15 * (wc - sw + scoop), -ad], U);
+  const a1 = P.control("a1", "Courbe d'emmanchure", [sw - scoop, -sd - 0.5 * (ad - sd)], S0, S);
+  const a2 = P.control("a2", "Courbe d'emmanchure", [sw - scoop + 0.15 * (wc - sw + scoop), -ad], U0, U);
+  const H = P.anchor("H", "Côté · bas", [wh, -len]);
+  const CH = P.anchor("CH", "Milieu bas", [0, -len], "vertical");
+  const neck = cubic(N, n1, n2, CN);
+  const arm = cubic(S, a1, a2, U);
   const armUp = arm.slice().reverse(); // U → S
   const edges: Edge[] = [
-    { id: "hem+", pts: [[0, -len], H], allowance: "hem" },
+    { id: "hem+", pts: [CH, H], allowance: "hem" },
     { id: "side+", pts: [H, U], allowance: "seam" },
     { id: "arm+", pts: armUp, allowance: "seam" },
     { id: "shoulder+", pts: [S, N], allowance: "seam" },
@@ -120,9 +57,9 @@ function bodice(
     { id: "shoulder-", pts: mirror([S, N]), allowance: "seam" },
     { id: "arm-", pts: mirror(armUp), allowance: "seam" },
     { id: "side-", pts: mirror([H, U]), allowance: "seam" },
-    { id: "hem-", pts: mirror([[0, -len], H]), allowance: "hem" },
+    { id: "hem-", pts: mirror([CH, H]), allowance: "hem" },
   ];
-  return { edges, armhole: polylineLength(arm) };
+  return { edges, armhole: polylineLength(arm), handles: P.handles, U, H, CH };
 }
 
 function sleeveCap(bw: number, ch: number): P2[] {
@@ -131,17 +68,19 @@ function sleeveCap(bw: number, ch: number): P2[] {
   return cubic([0, 0], [0.34 * h, 0], [0.55 * h, -ch], [h, -ch]);
 }
 
-export function draftTShirt(b: BodyMeasures, p: TShirtParams = DEFAULT_TSHIRT): Pattern {
+export function draftTShirt(b: BodyMeasures, p: TShirtParams = DEFAULT_TSHIRT, edits: PatternEdits = NO_EDITS): Pattern {
   const wc = (b.bust + p.chestEase) / 4;
   const wh = Math.max(wc, (b.hips + p.chestEase * 0.8) / 4);
   const sw = b.shoulderWidth / 2 + 1;
   const len = p.length > 0 ? p.length : b.hpsToHip + 10;
   const nw = b.neck / 6 + 1.2;
   const common = { nw, sw, sd: 4.5, wc, wh, ad: b.hpsToArmpit + 4.5, len };
-  const front = bodice("front", { ...common, nd: nw + 1.8 });
-  const back = bodice("back", { ...common, nd: 2 });
+  const front = bodice("front", { ...common, nd: nw + 1.8 }, edits);
+  const back = bodice("back", { ...common, nd: 2 }, edits);
 
-  // Sleeve: solve the cap height so that the cap matches the armhole (+ a little ease).
+  // Sleeve: solve the cap height so that the (drafted) cap matches the armhole, edited
+  // or not, plus a little ease: editing the armhole re-fits the sleeve. The sleeve's
+  // own edits then apply on top of the fitted cap.
   const bw = b.upperArm + p.sleeveEase;
   const target = (front.armhole + back.armhole) / 2 + 0.4;
   let lo = 2, hi = 25;
@@ -153,10 +92,17 @@ export function draftTShirt(b: BodyMeasures, p: TShirtParams = DEFAULT_TSHIRT): 
   const ch = (lo + hi) / 2;
   const sl = Math.max(p.sleeveLength, ch + 4);
   const hw = bw * 0.92;
-  const capFront = sleeveCap(bw, ch); // top → front corner
+  const h = bw / 2;
+  const SP = new PointSet("sleeve", "sleeve+", edits);
+  const T0: P2 = [0, 0], C0: P2 = [h, -ch];
+  const T = SP.anchor("T", "Haut de tête", T0, "vertical");
+  const Cf = SP.anchor("C", "Dessous de bras", C0);
+  const c1 = SP.control("c1", "Courbe de tête", [0.34 * h, 0], T0, T, "horizontal");
+  const c2 = SP.control("c2", "Courbe de tête", [0.55 * h, -ch], C0, Cf);
+  const Hf = SP.anchor("H", "Bas de manche", [hw / 2, -sl]);
+  const capFront = cubic(T, c1, c2, Cf); // top → front corner
   const capBack = mirror(capFront).reverse(); // top → back corner
-  const Cf: P2 = [bw / 2, -ch], Cb: P2 = [-bw / 2, -ch];
-  const Hf: P2 = [hw / 2, -sl], Hb: P2 = [-hw / 2, -sl];
+  const Cb: P2 = [-Cf[0], Cf[1]], Hb: P2 = [-Hf[0], Hf[1]];
   const sleeveEdges = (): Edge[] => [
     { id: "capBack", pts: capBack, allowance: "seam" },
     { id: "underBack", pts: [Cb, Hb], allowance: "seam" },
@@ -209,10 +155,27 @@ export function draftTShirt(b: BodyMeasures, p: TShirtParams = DEFAULT_TSHIRT): 
     byId.get(id)!.notches.push({ edge: "neck+", t: 1, count: 1 }, { edge: "hem+", t: 0, count: 1 }); // centre front / back
   for (const id of ["sleeve+", "sleeve-"] as const) byId.get(id)!.notches.push({ edge: "capBack", t: 0, count: 1 }); // top of cap ↔ shoulder seam
 
+  const chest = 2 * (front.U[0] + back.U[0]), length = -front.CH[1];
   return {
+    kind: "tshirt",
     name: "T-shirt col rond",
     pieces,
     seams,
-    dims: { chestWidth: wc * 4, hemWidth: wh * 4, length: len, armhole: front.armhole + back.armhole, capHeight: ch, bicep: bw },
+    handles: [...front.handles, ...back.handles, ...SP.handles],
+    dims: [
+      { label: "Tour de poitrine", value: chest },
+      { label: "Tour de bas", value: 2 * (front.H[0] + back.H[0]) },
+      { label: "Longueur", value: length },
+      { label: "Emmanchure", value: front.armhole + back.armhole },
+      { label: "Tête de manche", value: T[1] - Cf[1] },
+      { label: "Tour de bras", value: 2 * Cf[0] },
+    ],
+    sizeNote: `poitrine finie ${chest.toFixed(0)} cm · longueur ${length.toFixed(0)} cm`,
+    checks: [
+      { seam: "shoulder+", label: "Épaule", kind: "match" },
+      { seam: "side+", label: "Côté", kind: "match" },
+      { seam: "armFront+", label: "Emmanchure devant", kind: "ease" },
+      { seam: "armBack+", label: "Emmanchure dos", kind: "ease" },
+    ],
   };
 }

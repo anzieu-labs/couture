@@ -5,7 +5,7 @@
  */
 
 import { POSE_TOLERANCE } from "../posedBody";
-import { NEAR_MARGIN, SELF_CELLS_PER_AXIS } from "../selfCollision";
+import { NEAR_MARGIN, SELF_CELLS_PER_AXIS, SELF_MAX_CANDIDATES } from "../selfCollision";
 
 export const WORKGROUP = 64;
 
@@ -449,7 +449,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var acc = vec4f(0.0);
   var near = false;
   let start = table[2u * b + 1u];
-  let end = start + table[2u * b];
+  let end = start + min(table[2u * b], ${SELF_MAX_CANDIDATES}u); // capped: see SELF_MAX_CANDIDATES
   for (var k = start; k < end; k++) {
     let t = entries[k];
     let i0 = tris[3u * t];
@@ -551,7 +551,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var outA = vec4f(0.0);
   var outB = vec4f(0.0);
   let start = table[2u * b + 1u];
-  let end = start + table[2u * b];
+  let end = start + min(table[2u * b], ${SELF_MAX_CANDIDATES}u); // capped: see SELF_MAX_CANDIDATES
   for (var k = start; k < end; k++) {
     let f = entries[k];
     if (f == e) { continue; }

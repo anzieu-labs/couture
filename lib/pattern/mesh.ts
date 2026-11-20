@@ -1,7 +1,7 @@
 import Constrainautor from "@kninnug/constrainautor";
 import Delaunator from "delaunator";
 import { polylineLength, resample, type P2 } from "./curves";
-import type { Pattern, PieceId } from "./tshirt";
+import type { Pattern, PieceId } from "./types";
 
 /**
  * Turns a pattern into a simulation mesh: every piece is sampled at ~`spacing`
@@ -130,13 +130,20 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
     }
 
     // 3. Constrained Delaunay triangulation; drop the triangles outside the piece.
-    const coords = new Float64Array(points.length * 2);
-    points.forEach((p, i) => coords.set(p, 2 * i));
+    // A frame of 4 far points around the piece keeps every boundary edge off the convex
+    // hull: with nearly collinear boundary points (resampled straight edges), a constraint
+    // lying on the hull can make Constrainautor fail ("Constraining edge exited the hull").
+    // Triangles touching the frame are outside the piece and dropped below.
+    const pad = Math.max(maxX - minX, maxY - minY);
+    const frame: P2[] = [[minX - pad, minY - pad], [maxX + pad, minY - pad], [maxX + pad, maxY + pad], [minX - pad, maxY + pad]];
+    const coords = new Float64Array((points.length + frame.length) * 2);
+    [...points, ...frame].forEach((p, i) => coords.set(p, 2 * i));
     const del = new Delaunator(coords);
     new Constrainautor(del, boundary.map((_, i) => [i, (i + 1) % boundary.length] as [number, number]));
     const t = del.triangles;
     for (let i = 0; i < t.length; i += 3) {
       const [a, b, c] = [t[i], t[i + 1], t[i + 2]];
+      if (a >= points.length || b >= points.length || c >= points.length) continue; // frame
       const area = (points[b][0] - points[a][0]) * (points[c][1] - points[a][1]) - (points[c][0] - points[a][0]) * (points[b][1] - points[a][1]);
       if (Math.abs(area) < 1e-6 * spacing * spacing) continue; // flat triangle along a straight boundary
       const cx = (points[a][0] + points[b][0] + points[c][0]) / 3, cy = (points[a][1] + points[b][1] + points[c][1]) / 3;

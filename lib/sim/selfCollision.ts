@@ -70,6 +70,14 @@ export const UNTANGLE_INTERVAL = 0.2;
 export const NEAR_MARGIN = 0.5;
 /** Most cells covered by a grown box, per axis. */
 export const SELF_CELLS_PER_AXIS = 3;
+/**
+ * Most primitives a vertex (or an edge) examines in its hash bucket. A normal drape
+ * fills buckets with ~35 triangles (≤ 150); cloth crushed between body parts can pile
+ * thousands into one cell, and the cost (quadratic) would run away until the GPU gives
+ * up. Past this cap the remaining candidates are skipped: those contacts are already
+ * meaningless in a crushed lump, and the cost stays bounded.
+ */
+export const SELF_MAX_CANDIDATES = 256;
 
 export function buildSelfCollision(
   triangles: Uint32Array,
@@ -276,7 +284,7 @@ export class SelfCollider {
       const px = pos[3 * v], py = pos[3 * v + 1], pz = pos[3 * v + 2];
       const b = H.bucketOf(px, py, pz);
       const cv = canon[v];
-      for (let k = H.starts[b], end = H.starts[b] + H.counts[b]; k < end; k++) {
+      for (let k = H.starts[b], end = H.starts[b] + Math.min(H.counts[b], SELF_MAX_CANDIDATES); k < end; k++) {
         const t = H.entries[k];
         const i0 = T[3 * t], i1 = T[3 * t + 1], i2 = T[3 * t + 2];
         if (canon[i0] === cv || canon[i1] === cv || canon[i2] === cv) continue;
@@ -328,7 +336,7 @@ export class SelfCollider {
       const le = Math.hypot(dx, dy, dz);
       const bucket = H.bucketOf(ax + dx / 2, ay + dy / 2, az + dz / 2);
       const ca = canon[a], cb = canon[b];
-      for (let k = H.starts[bucket], end = H.starts[bucket] + H.counts[bucket]; k < end; k++) {
+      for (let k = H.starts[bucket], end = H.starts[bucket] + Math.min(H.counts[bucket], SELF_MAX_CANDIDATES); k < end; k++) {
         const f = H.entries[k];
         if (f === e) continue;
         const c = E[2 * f], d = E[2 * f + 1];

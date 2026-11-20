@@ -7,7 +7,8 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
 - **Mannequin** : Anny (NAVER LABS Europe, Apache 2.0, MakeHuman CC0) exporté en GLB + JSON
   (`tools/mannequin/`), morphologie homme ↔ femme, mensurations lisibles et modifiables (stature,
   poitrine, taille, hanches), 18 ajustements de couture.
-- **Patron** : t‑shirt col rond tracé depuis les mesures du corps (`lib/pattern/tshirt.ts`), 4 pièces,
+- **Patrons** : t‑shirt col rond, cape à capuche, jupe trapèze, tracés depuis les mesures du corps
+  (`lib/pattern/`). T-shirt (`tshirt.ts`) : 4 pièces,
   coutures appariées, maillage Delaunay contraint (Delaunator + Constrainautor). Pièces à couper avec
   marges, crans et repères ; export PDF A4 tuilé, SVG 1:1, DXF AAMA.
 - **Simulation** : XPBD (étirement anisotrope, flexion isométrique de Bergou,
@@ -50,8 +51,29 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
 
 ## 2. Cœur de l'outil de conception
 
-- [ ] **Éditeur de patron 2D interactif** : déplacer les points, modifier les courbes (encolure,
-  emmanchure), recouture automatique en 3D.
+- [x] **Éditeur de patron 2D interactif** (`components/PatternEditor.tsx`, bouton « Éditer le patron
+  en 2D » de l'onglet Patron ; à gauche de la 3D sur grand écran, par-dessus sur mobile) :
+  - le tracé reste paramétrique : une modification est le **déplacement d'un point nommé** par
+    rapport à sa position tracée (`PatternEdits`, `lib/pattern/tshirt.ts`), elle survit donc à un
+    changement de morphologie ou de coupe. Points d'ancrage (encolure-épaule, milieu d'encolure, point
+    d'épaule, dessous de bras, côté-bas, milieu bas ; haut de tête, dessous de bras et bas de manche)
+    et poignées de Bézier (encolure, emmanchure, tête de manche) qui suivent leur ancrage. Pièces
+    symétriques : on édite la moitié droite, l'autre est son miroir ; les points du milieu ne bougent
+    que verticalement, les poignées voisines qu'horizontalement (courbe lisse au milieu) ;
+  - la tête de manche se recale sur l'emmanchure modifiée (hauteur résolue sur la longueur), les
+    modifications propres à la manche s'appliquent ensuite ;
+  - glisser (Maj : un seul axe, pas de 1 mm), flèches 1 mm / Maj 1 cm, double-clic ou Suppr : rétablir
+    le point, annuler / rétablir (⌘Z / ⇧⌘Z, 100 pas), molette : zoom, glisser le fond : déplacer ;
+  - longueurs des coutures comparées en direct (épaule et côté devant / dos, embu de tête de manche),
+    survol d'une ligne = coutures surlignées ; marges de coupe affichées ;
+  - recouture 3D au relâcher ; un contour qui se recoupe, se retourne ou a un bord écrasé est signalé
+    (`lib/pattern/validate.ts`), la 3D garde la dernière version valide et les exports sont suspendus.
+  Corrigé au passage : course entre l'analyse de démêlage d'un vêtement et la recouture suivante
+  (réponse écrite dans les buffers GPU du nouveau maillage, erreur WebGPU) ; échec de la triangulation
+  contrainte sur certaines formes (arête contrainte sur l'enveloppe convexe : cadre de 4 points ajouté,
+  maillage inchangé pour le tracé d'origine). Essai : 300 jeux de modifications aléatoires, 0 échec de
+  maillage ou de marges sur les contours valides.
+  *À faire* : édition libre de la manche (devant ≠ dos), ajout / suppression de points, pinces.
 - [ ] **Variantes du t‑shirt** : col V, manches longues, oversize / cintré.
 - [ ] **Finitions des bords libres** (choix par bord, au design) : ourlet replié, bord-côte cousu, biais,
   parementure. Aujourd'hui tous les bords sont francs. Un premier essai d'ourlet automatique sur tous les bords
@@ -107,6 +129,28 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   *Limites* : marche sur place (le pied d'appui glisse comme sur un tapis), écartement des bras
   limité à 20° (en dessous, le skinning écrase le dessus de l'épaule et pince la manche), solveur
   CPU ~3× plus lent quand le corps bouge (la marche passe au ralenti si le processeur ne suit pas).
+- [x] **Cape qui marche à 1–8 i/s** (diagnostic 2026-11) : deux causes. (1) Rythme « temps réel » sans
+  garde-fou : une image simulée un peu au-dessus du budget (~14 ms GPU pour la cape + le rendu)
+  faisait rattraper jusqu'à 6 images d'un coup, puis saturer la file GPU (gel ~0,7 s). Désormais au
+  plus 2 images simulées en vol et 2 de rattrapage : le mouvement ralentit au lieu de geler. (2) Lancer
+  la marche pendant la chute de la cape la coinçait entre le bras et la hanche : tissu écrasé, jusqu'à
+  5 500 triangles dans une case de 2,7 cm, auto-collision ×40 (380 ms / image) jusqu'à la perte du
+  GPU. Désormais `settleTime` (temps de tomber avant que le corps bouge, cape 3 s) et plafond de
+  256 candidats par sommet / arête dans l'auto-collision (GPU et CPU), pour que le coût reste borné
+  si du tissu se fait écraser quand même (filet non mis à l'épreuve : l'écrasement n'a pas pu être
+  reproduit à la demande une fois le délai en place).
+  Coût mesuré (GPU, marche) : t-shirt 9–11 ms / image simulée, jupe 12, cape 12–14 ; l'auto-collision
+  en fait ~55 %. Reconstruire la table de hachage coûte cher (préfixe sur un seul groupe de travail,
+  10 fois par image) : une table 8× plus grande est plus lente.
+- [ ] **Pistes d'optimisation (littérature)** :
+  - reconstruire le hachage une fois par image au lieu de chaque passe, avec une marge, et ne refaire
+    la détection que quand assez de sommets sortent de leur borne de déplacement (Offset Geometric
+    Contact, Chen et al. SIGGRAPH 2025 : borne ≈ 0,45 × distance au plus proche, nouvelle détection
+    quand > 1 % des sommets la dépassent) ; préfixe parallèle multi-groupes ;
+  - taille de case sur la moyenne des boîtes des triangles plutôt que la plus grande arête (PSCC,
+    Tang et al. I3D 2018) ; culling par cônes de normales pour les zones sans auto-contact possible ;
+  - auto-collision tous les 3 sous-pas pour les grands vêtements (−25 % mesuré, à valider en croisements) ;
+  - tissu pincé entre deux parties du corps : « collision flypapering » (Baraff, Witkin, Kass 2003).
 - [ ] Arrêt de la simulation au repos réellement efficace (mesure du mouvement plus fréquente).
 - [ ] Rigidité réelle des tissés : l'étirement résiduel décroît en h² (10 sous-pas : 7,5 %,
   20 : 2,7 %, 40 : 1 % en haut du devant, denim). Pistes : plus d'itérations d'étirement,
@@ -114,7 +158,27 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
 
 ## 4. Autres vêtements
 
-- [ ] Jupe.
+Catalogue : `lib/pattern/garments.ts` (nom, description, image, réglages, tracé). Choix par une
+fenêtre plein écran de cartes (`components/GarmentPicker.tsx`, bouton « Changer » de l'onglet Patron) ;
+images du vêtement drapé dans `public/garments/`, recapturées par `tools/thumbnails/capture.mjs`
+(à relancer après l'ajout d'un vêtement ou un changement de rendu) ; réglages et modifications (avec leur historique) gardés par vêtement. Types communs dans
+`lib/pattern/types.ts` ; chaque patron décrit ses cotes, ses coutures à comparer dans l'éditeur et
+ses besoins de simulation (`sim` : finesse du maillage, hauteur de chute, amortissement, durée). Mise
+en place 3D par type dans `lib/garment/place.ts`.
+
+- [x] **Cape à capuche** (`lib/pattern/cape.ts`) : cercle complet ouvert devant (dos en
+  demi-cercle, coupable au pli ; deux devants en quart de cercle moins 5°), capuche deux pièces à
+  couture milieu, pointe réglable, encolure de capuche coupée au cran d'épaule (devant / dos).
+  Placement : le cercle est plat, posé à plat à la base du cou juste au-dessus des épaules (hauteur
+  mesurée sur le corps), sans distorsion ; capuche en deux panneaux verticaux de part et d'autre de la
+  tête. Le tissu tombe ensuite en pendule autour des épaules : amortissement 6 /s (sur-amorti), sinon
+  le bas passe sous la cape, s'y coince et s'emmêle. Maillage 2,2× plus lâche (~11 000 sommets GPU).
+  *Limites* : bouts des doigts qui traversent (doigts plus fins que le champ de distance) ; 50 pages A4
+  pour la longueur par défaut (le SVG sur traceur est plus adapté).
+- [x] **Jupe trapèze** (`lib/pattern/skirt.ts`) : devant et dos (au pli), sans pinces (galbe pris
+  dans la couture de côté, de la hanche à la taille), évasement réglable, bas d'équerre avec le côté.
+  Placement rang par rang : chaque ligne horizontale du patron enroulée sur une ellipse autour de la
+  section du corps à cette hauteur (jambes réunies sous l'entrejambe), de périmètre égal à sa largeur.
 - [ ] Pantalon (entrejambe, jambes).
 
 ## 5. Socle technique
@@ -148,5 +212,9 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   espace repos, mêmes formules que le noyau `contactsWGSL`). En mode GPU l'horloge d'animation suit
   le temps simulé (temps réel pendant un mouvement, avance rapide sinon) ; en mode CPU le worker
   possède la chronologie et envoie la pose avec chaque image.
+- Champ de distance du corps : boîte du vêtement (+ chute) bornée à celle du corps (hors de la boîte
+  le champ vaut « loin ») ; pas de 1 cm, plus grossier au-delà de 1,5 M cellules (cape).
+- Mesures pour les vêtements (`lib/avatar/bodyMeasures.ts`) : tête (hauteur, profondeur, largeur),
+  cou (section à l'encolure), taille naturelle, taille → hanche / genou, sections du bas du corps.
 - Après un nouvel export du mannequin, la grille d'influences (`BodySdf.skin`) dépend des attributs
   `JOINTS_0` / `WEIGHTS_0` du GLB et de `bones.parents` du JSON.

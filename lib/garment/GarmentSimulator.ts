@@ -16,12 +16,15 @@ export interface SimulatorEvents {
 export class GarmentSimulator {
   private readonly worker: Worker;
   private id = 0;
+  /** Id of the garment last delivered (mesh / model): the one on screen. */
+  private shown = 0;
 
   constructor(private readonly events: SimulatorEvents) {
     this.worker = new Worker(new URL("./sim.worker.ts", import.meta.url), { type: "module" });
     this.worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
       const msg = e.data;
       if (msg.id !== this.id) return; // stale
+      if (msg.type === "mesh" || msg.type === "model") this.shown = msg.id;
       if (msg.type === "mesh") this.events.onMesh(msg);
       else if (msg.type === "model") this.events.onModel(msg);
       else if (msg.type === "frame") this.events.onFrame(msg.positions, msg.progress, msg.bones);
@@ -40,9 +43,14 @@ export class GarmentSimulator {
     this.worker.postMessage({ type: "motion", ...req } satisfies WorkerRequest);
   }
 
-  /** GPU mode: asks for the intersection analysis of the current garment's positions. */
+  /**
+   * GPU mode: asks for the intersection analysis of the displayed garment's positions.
+   * Tagged with that garment's id, not the latest request's: positions read back from the
+   * old garment while a new one is being prepared must not be analysed against the new
+   * mesh (the reply would be written into buffers of another size).
+   */
   untangle(positions: Float32Array) {
-    this.worker.postMessage({ type: "tangles", id: this.id, positions } satisfies WorkerRequest, [positions.buffer]);
+    this.worker.postMessage({ type: "tangles", id: this.shown, positions } satisfies WorkerRequest, [positions.buffer]);
   }
 
   cancel() {

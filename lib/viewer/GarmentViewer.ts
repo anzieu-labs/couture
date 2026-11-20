@@ -9,7 +9,7 @@ import { Animator, CADENCE, MOTION_DELAY, SETTLE_TIME } from "../avatar/motion";
 import { BONE_STRIDE, Skeleton, skinVertices } from "../avatar/skeleton";
 import { GarmentSimulator } from "../garment/GarmentSimulator";
 import { MeshSlicer } from "../geometry/slice";
-import type { BodyMeasures, Pattern } from "../pattern/tshirt";
+import type { BodyMeasures, Pattern } from "../pattern/types";
 import { SELF_DELAY, type ClothParams } from "../sim/model";
 import { UNTANGLE_INTERVAL } from "../sim/selfCollision";
 import type { Textile } from "../textiles/catalog";
@@ -47,6 +47,15 @@ const REST = { mean: 0.003, max: 0.03, count: 1 };
 /** Real-time pacing while the body moves: simulated time the solver may lag behind (s). */
 const MAX_LAG = 0.1;
 const SIM_DT = 1 / 60;
+/**
+ * Simulated frames queued on the GPU and not finished yet: past this, a rendered
+ * frame simulates nothing. Catching up at most this many frames per rendered frame.
+ * Without these limits, a garment slightly over the frame budget (cape: ~14 ms of
+ * simulation + the render) lags, catches up with 6 frames at once, lags more… and
+ * the page freezes (1 fps). With them, the walk slows down instead, smoothly.
+ */
+const MAX_IN_FLIGHT = 2;
+const MAX_CATCH_UP = 2;
 
 interface Garment {
   mesh: THREE.Mesh;
@@ -121,6 +130,8 @@ export class GarmentViewer {
   /** Animation clock (s). */
   private clock = 0;
   private lag = 0;
+  /** Simulated frames submitted to the GPU and not completed. */
+  private gpuInFlight = 0;
   private walkWanted = false;
   private cadence = CADENCE.default;
   private armSpread: number | null = null;
@@ -282,9 +293,9 @@ export class GarmentViewer {
   }
 
   /** Starts a new garment's timeline: rest pose while it is sewn, then the requested walk. */
-  private restartMotion(sewTime: number) {
+  private restartMotion(params: Pick<ClothParams, "sewTime" | "settleTime">) {
     this.animator.reset();
-    this.animator.holdUntil(this.clock + sewTime + MOTION_DELAY);
+    this.animator.holdUntil(this.clock + params.sewTime + params.settleTime + MOTION_DELAY);
     this.animator.restoreArmSpread(this.clock);
     if (this.walkWanted) this.animator.setWalking(true, this.clock);
     this.cpuBones = null;
@@ -388,7 +399,7 @@ export class GarmentViewer {
     const device = this.gpuDevice;
     if (!device) return;
     const solver = new GpuClothSolver(device, model, g.initial, sdf, this.skeleton.count);
-    this.restartMotion(model.params.sewTime);
+    this.restartMotion(model.params);
     const shell = new GpuClothShell(this.renderer, g.rest, g.triangles, g.thickness, g.tensile, solver.positions);
     const rebuildShell = () => {
       const encoder = device.createCommandEncoder();
@@ -430,10 +441,15 @@ export class GarmentViewer {
   private stepGpuGarment(gpu: NonNullable<Garment["gpu"]>, interval: number) {
     const { solver, shell } = gpu;
     let frames: number;
-    if (this.animator.moving(this.clock)) {
+    if (this.gpuInFlight >= MAX_IN_FLIGHT) {
+      // The GPU is behind: render only. The body's clock follows the simulation, so
+      // the motion slows down rather than piling up work.
+      frames = 0;
+      this.lag = 0;
+    } else if (this.animator.moving(this.clock)) {
       this.lag = Math.min(MAX_LAG, this.lag + Math.max(0, interval) / 1000);
-      frames = Math.floor(this.lag / SIM_DT);
-      this.lag -= frames * SIM_DT;
+      frames = Math.min(MAX_CATCH_UP, Math.floor(this.lag / SIM_DT));
+      this.lag = Math.min(this.lag - frames * SIM_DT, SIM_DT);
     } else {
       this.lag = 0;
       if (interval > 0 && interval < 200) {
@@ -445,6 +461,8 @@ export class GarmentViewer {
     if (frames > 0) {
       const t0 = this.clock;
       solver.simulate(frames, SIM_DT, (encoder) => shell.encode(encoder), (t, out) => this.animator.sample(t0 + t, out));
+      this.gpuInFlight++;
+      this.gpuDevice?.queue.onSubmittedWorkDone().then(() => this.gpuInFlight--);
       this.clock += frames * SIM_DT;
     }
     if (this.animator.moving(this.clock)) {

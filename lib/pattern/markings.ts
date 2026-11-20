@@ -1,5 +1,5 @@
 import { polylineLength, type P2 } from "./curves";
-import type { Edge, EdgeAllowance, Pattern, Piece } from "./tshirt";
+import { seamKinds, type Edge, type EdgeAllowance, type Pattern, type Piece } from "./types";
 
 /**
  * Turns the net pattern (stitching lines, as simulated) into cutting pieces:
@@ -29,7 +29,7 @@ export interface CutPiece {
   quantity: number;
   onFold: boolean;
   /** Stitching line per edge (for colouring) — loop order. */
-  seamEdges: { id: string; pts: P2[] }[];
+  seamEdges: { id: string; pts: P2[]; seam?: string }[];
   /** Stitching line, closed loop. */
   seamLine: P2[];
   /** Cutting line, closed loop. */
@@ -248,8 +248,8 @@ function halfPiece(piece: Piece): Piece {
     edges: [...kept, { id: "fold", pts: [top, bottom], allowance: "none" }],
     notches: piece.notches.filter((n) => ids.has(n.edge)),
     // Fold on the left (centre), grain line towards the side seam, label in between.
-    grain: [[0.78 * xMax, piece.grain[0][1]], [0.78 * xMax, piece.grain[1][1]]],
-    label: [0.4 * xMax, piece.label[1]],
+    grain: piece.foldGrain ?? [[0.78 * xMax, piece.grain[0][1]], [0.78 * xMax, piece.grain[1][1]]],
+    label: piece.foldLabel ?? [0.4 * xMax, piece.label[1]],
   };
 }
 
@@ -269,6 +269,7 @@ export function allowanceNote(al: Allowances): string {
 export function cutPieces(pattern: Pattern, al: Allowances, opts: { fold: boolean }): CutPiece[] {
   const seen = new Set<string>();
   const out: CutPiece[] = [];
+  const kinds = seamKinds(pattern);
   for (const original of pattern.pieces) {
     if (seen.has(original.name)) continue;
     seen.add(original.name);
@@ -304,13 +305,16 @@ export function cutPieces(pattern: Pattern, al: Allowances, opts: { fold: boolea
       foldSegment = cut.findIndex((q, i) => onCentre(q) && onCentre(cut[(i + 1) % cut.length]));
       if (foldSegment >= 0) fold = [cut[foldSegment], cut[(foldSegment + 1) % cut.length]];
     }
-    const cutNote = `Couper ×${piece.quantity}${onFold ? " au pli" : ""}`;
+    // Asymmetric pieces cut twice: a mirrored pair (fabric folded, or the piece turned over).
+    const cutNote = `Couper ×${piece.quantity}${onFold ? " au pli" : !piece.symmetric && piece.quantity > 1 ? " en vis-à-vis" : ""}`;
     out.push({
       id: piece.id,
       name: piece.name,
       quantity: piece.quantity,
       onFold,
-      seamEdges: piece.edges.filter((e) => e.allowance !== "none").map((e) => ({ id: e.id, pts: e.pts })),
+      seamEdges: piece.edges
+        .filter((e) => e.allowance !== "none")
+        .map((e) => ({ id: e.id, pts: e.pts, seam: kinds.get(`${original.id}/${e.id}`) })),
       seamLine,
       cutLine: cut,
       turns,

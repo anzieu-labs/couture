@@ -15,8 +15,8 @@ export interface PathPrim {
   closed?: boolean;
   fill?: boolean;
   role: Role;
-  /** Edge id, for colouring the stitching line by seam in the preview. */
-  edge?: string;
+  /** Seam kind of a stitching line (seam id without side), for colouring in the preview. */
+  seam?: string;
 }
 
 export interface TextPrim {
@@ -83,7 +83,7 @@ export function pieceBlock(piece: CutPiece, detail: "print" | "preview"): Block 
         const k = piece.foldSegment + 1;
         prims.push({ kind: "path", pts: [...cut.slice(k), ...cut.slice(0, k)], role: "cut" });
       } else prims.push({ kind: "path", pts: cut, closed: true, role: "cut" });
-      for (const e of piece.seamEdges) prims.push({ kind: "path", pts: e.pts.map(T), role: "seam", edge: e.id });
+      for (const e of piece.seamEdges) prims.push({ kind: "path", pts: e.pts.map(T), role: "seam", seam: e.seam });
       for (const [a, c] of piece.notches) prims.push({ kind: "path", pts: [T(a), T(c)], role: "notch" });
 
       // Grain line with arrows at both ends.

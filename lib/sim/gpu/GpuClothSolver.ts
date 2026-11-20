@@ -364,7 +364,9 @@ export class GpuClothSolver {
 
   /** Tangled regions (untangle.ts output) for the self-collision passes. */
   setTangles(tangle: Float32Array) {
-    if (this.tangle) this.device.queue.writeBuffer(this.tangle, 0, tangle as Float32Array<ArrayBuffer>);
+    // Size check: a reply computed for another mesh must never reach this buffer.
+    if (this.tangle && tangle.byteLength === this.tangle.size)
+      this.device.queue.writeBuffer(this.tangle, 0, tangle as Float32Array<ArrayBuffer>);
   }
 
   dispose() {

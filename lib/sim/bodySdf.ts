@@ -9,7 +9,19 @@ import type { SkinWeights } from "../avatar/anny";
  * The field is built in the rest pose. With skin weights, each cell also gets
  * the skin influences of its closest body vertex, so that an animated body can
  * be collided with in rest space (see lib/sim/posedBody.ts).
+ *
+ * Thin parts (the hands) can be inflated: the distance is reduced by an offset
+ * weighted by the skin weight of the given joints, so the cloth meets a "mitten"
+ * rather than fingers. Collisions are tested at the cloth vertices only: with
+ * triangles wider than a finger (a cape's 2.2 cm mesh), fingertips poke through
+ * between vertices, and the gaps between fingers catch the fabric.
  */
+
+/** Joints whose skin is inflated, and by how much (m). */
+export interface Inflation {
+  joints: number[];
+  offset: number;
+}
 /** Regular grid of signed distances (x fastest), as uploaded to the GPU. */
 export interface SdfGrid {
   readonly data: Float32Array;
@@ -41,6 +53,7 @@ export class BodySdf implements SdfGrid {
     readonly h = 0.01,
     band = 0.05,
     skin?: SkinWeights,
+    inflate?: Inflation,
   ) {
     const nx = (this.nx = Math.ceil((max[0] - min[0]) / h) + 1);
     const ny = (this.ny = Math.ceil((max[1] - min[1]) / h) + 1);
@@ -119,6 +132,16 @@ export class BodySdf implements SdfGrid {
           if (ok && inside.has(c + d)) next.add(c + d);
       }
       frontier = [...next];
+    }
+
+    // Inflation of thin parts, in the band (where the closest vertex is known), before
+    // the skin grid spreads `nearest` to every cell. Weighted by skinning, so the offset
+    // fades in along the wrist instead of making a step in the field.
+    if (inflate && skin && nearest && inflate.offset > 0) {
+      const share = new Float32Array(positions.length / 3);
+      for (let v = 0; v < share.length; v++)
+        for (let k = 0; k < 4; k++) if (inflate.joints.includes(skin.index[4 * v + k])) share[v] += skin.weight[4 * v + k] / 255;
+      for (let c = 0; c < n; c++) if (nearest[c] >= 0 && share[nearest[c]] > 0) sdf[c] -= inflate.offset * share[nearest[c]];
     }
 
     if (skin && nearest) this.skin = skinGrid(nearest, skin, nx, ny, nz);

@@ -1,6 +1,6 @@
 import { allowanceNote, cutPieces, type Allowances, type CutPiece } from "../markings";
 import { layoutShelves, pieceBlock, rotateBlock, testSquareBlock, type Block, type Sheet } from "../sheet";
-import type { Pattern } from "../tshirt";
+import type { Pattern } from "../types";
 import { piecesToDxf } from "./dxf";
 import { sheetToPdf, TILE, tileGrid } from "./pdf";
 import { sheetToSvg } from "./svg";

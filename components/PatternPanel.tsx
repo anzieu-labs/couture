@@ -1,37 +1,35 @@
 "use client";
 
+import Image from "next/image";
 import { useMemo, useState } from "react";
 import { download, exportDxf, exportPdf, exportSvg, type ExportOptions } from "@/lib/pattern/export";
 import { cutPieces } from "@/lib/pattern/markings";
 import { layoutRow, pieceBlock, type Prim } from "@/lib/pattern/sheet";
-import type { Pattern, TShirtParams } from "@/lib/pattern/tshirt";
+import type { GarmentDef, GarmentParams } from "@/lib/pattern/garments";
+import type { BodyMeasures, GarmentKind, Pattern } from "@/lib/pattern/types";
+import { GarmentPicker } from "./GarmentPicker";
 import { RangeField } from "./RangeField";
+import { seamColor, seamLegend } from "./seamColors";
 import { Section } from "./Section";
 
 interface Props {
   pattern: Pattern | null;
-  params: TShirtParams;
-  onParams: (p: TShirtParams) => void;
-  autoLength: number | null;
+  garment: GarmentDef;
+  onGarment: (kind: GarmentKind) => void;
+  params: GarmentParams;
+  onParams: (p: GarmentParams) => void;
+  measures: BodyMeasures | null;
   progress: number;
   onResew: () => void;
   cutting: ExportOptions;
   onCutting: (o: ExportOptions) => void;
-}
-
-const SEAM_COLORS: Record<string, string> = {
-  shoulder: "#c0643e",
-  side: "#3f7cac",
-  arm: "#8a6bb8",
-  capFront: "#8a6bb8",
-  capBack: "#8a6bb8",
-  underBack: "#4f9a6a",
-  underFront: "#4f9a6a",
-};
-
-function seamColor(edgeId: string): string | null {
-  const base = edgeId.replace(/[+-]$/, "");
-  return SEAM_COLORS[base] ?? null;
+  editorOpen: boolean;
+  onEditor: (open: boolean) => void;
+  /** Number of edited points. */
+  editCount: number;
+  onResetEdits: () => void;
+  /** Problems of the edited pattern (it cannot be sewn or exported). */
+  issues: string[];
 }
 
 const pts = (p: [number, number][]) => p.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
@@ -43,7 +41,7 @@ function PreviewPrim({ p }: { p: Prim }) {
     case "cut":
       return <path d={d} fill="white" stroke="var(--color-ink)" strokeWidth={0.3} strokeLinejoin="round" />;
     case "seam": {
-      const c = p.edge ? seamColor(p.edge) : null;
+      const c = seamColor(p.seam);
       return c ? (
         <path d={d} fill="none" stroke={c} strokeWidth={0.8} strokeLinecap="round" />
       ) : (
@@ -69,7 +67,7 @@ function PatternSvg({ pattern, cutting }: { pattern: Pattern; cutting: ExportOpt
   }, [pattern, cutting]);
   const { width, height, prims, slots, pieces } = sheet;
   return (
-    <svg viewBox={`-3 -3 ${width + 6} ${height + 12}`} className="w-full" role="img" aria-label="Patron du t-shirt">
+    <svg viewBox={`-3 -3 ${width + 6} ${height + 12}`} className="w-full" role="img" aria-label={`Patron : ${pattern.name}`}>
       {prims.map((p, i) => (
         <PreviewPrim key={i} p={p} />
       ))}
@@ -84,7 +82,8 @@ function PatternSvg({ pattern, cutting }: { pattern: Pattern; cutting: ExportOpt
   );
 }
 
-const measuresNote = (p: Pattern) => `poitrine finie ${p.dims.chestWidth.toFixed(0)} cm · longueur ${p.dims.length.toFixed(0)} cm`;
+/** File name from the pattern name: "Cape à capuche" → "cape-a-capuche". */
+const slug = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 const EXPORTS = [
   { id: "pdf", label: "PDF A4", title: "PDF à l'échelle 1, tuilé sur pages A4 à assembler", run: exportPdf, ext: "pdf" },
@@ -101,7 +100,7 @@ function ExportSection({ pattern, cutting, onCutting }: { pattern: Pattern | nul
     // Let the button repaint before the (synchronous) layout search.
     setTimeout(() => {
       try {
-        download(e.run(pattern, cutting, measuresNote(pattern)), `t-shirt-col-rond.${e.ext}`);
+        download(e.run(pattern, cutting, pattern.sizeNote), `${slug(pattern.name)}.${e.ext}`);
       } finally {
         setBusy(null);
       }
@@ -130,7 +129,7 @@ function ExportSection({ pattern, cutting, onCutting }: { pattern: Pattern | nul
         />
         <label className="flex items-center gap-2 text-xs">
           <input type="checkbox" checked={cutting.fold} onChange={(e) => onCutting({ ...cutting, fold: e.target.checked })} className="accent-ink" />
-          <span className="font-medium">Devant et dos au pli</span>
+          <span className="font-medium">Pièces symétriques au pli</span>
           <span className="text-muted">(demi-pièces)</span>
         </label>
         <div className="flex flex-wrap gap-2">
@@ -148,52 +147,88 @@ function ExportSection({ pattern, cutting, onCutting }: { pattern: Pattern | nul
           ))}
         </div>
         <p className="text-[11px] leading-relaxed text-muted">
-          Crans : simple au devant, aux milieux et en haut de manche, double au dos. Le DXF contient toujours les pièces entières.
+          Les crans se font face d&apos;une pièce à l&apos;autre (doubles côté dos). Le DXF contient toujours les pièces entières.
         </p>
       </div>
     </Section>
   );
 }
 
-const SLIDERS: { key: keyof TShirtParams; label: string; min: number; max: number }[] = [
-  { key: "chestEase", label: "Aisance poitrine", min: -12, max: 30 },
-  { key: "sleeveEase", label: "Aisance manche", min: -4, max: 16 },
-  { key: "sleeveLength", label: "Longueur de manche", min: 12, max: 40 },
-];
-
-export function PatternPanel({ pattern, params, onParams, autoLength, progress, onResew, cutting, onCutting }: Props) {
+export function PatternPanel({
+  pattern, garment, onGarment, params, onParams, measures, progress, onResew, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
+}: Props) {
   const simulating = progress > 0 && progress < 1;
+  const [picking, setPicking] = useState(false);
+  // Pieces to cut, as printed (a piece listed twice for the simulation is one piece cut ×2).
+  const pieceCount = pattern ? new Set(pattern.pieces.map((p) => p.name)).size : 0;
   return (
     <>
-      <Section title="Patron" aside={pattern ? `${pattern.pieces.length} pièces` : undefined}>
+      <Section title="Vêtement">
+        <div className="flex items-center gap-3 rounded-xl border border-line bg-white/60 p-2 pr-3">
+          <Image src={garment.image} alt="" width={48} height={64} className="h-16 w-12 shrink-0 rounded-lg bg-canvas object-cover" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-semibold">{garment.name}</p>
+            <p className="truncate text-[11px] text-muted">{garment.description}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setPicking(true)}
+            className="shrink-0 rounded-full border border-ink px-3 py-1.5 text-xs font-medium transition-colors hover:bg-ink hover:text-white"
+          >
+            Changer
+          </button>
+        </div>
+        <GarmentPicker
+          open={picking}
+          current={garment.id}
+          onSelect={(kind) => {
+            onGarment(kind);
+            setPicking(false);
+          }}
+          onClose={() => setPicking(false)}
+        />
+      </Section>
+
+      <Section title="Patron" aside={pattern ? `${pieceCount} pièces` : undefined}>
         <div className="rounded-lg border border-line bg-white/60 p-3">
           {pattern ? <PatternSvg pattern={pattern} cutting={cutting} /> : <p className="text-xs text-muted">Calcul…</p>}
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted">
-            <Legend color={SEAM_COLORS.shoulder} label="Épaules" />
-            <Legend color={SEAM_COLORS.side} label="Côtés" />
-            <Legend color={SEAM_COLORS.arm} label="Emmanchures" />
-            <Legend color={SEAM_COLORS.underBack} label="Dessous de bras" />
+            {pattern && seamLegend(pattern).map((l) => <Legend key={l.label} color={l.color} label={l.label} />)}
             <Legend color="var(--color-ink)" label="Coupe (marges incluses)" thin />
           </div>
         </div>
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <button
+            type="button"
+            onClick={() => onEditor(!editorOpen)}
+            aria-pressed={editorOpen}
+            className="rounded-full border border-ink px-3 py-1.5 text-xs font-medium transition-colors hover:bg-ink hover:text-white aria-pressed:bg-ink aria-pressed:text-white"
+          >
+            {editorOpen ? "Fermer l'éditeur 2D" : "Éditer le patron en 2D"}
+          </button>
+          {editCount > 0 && (
+            <span className="text-[11px] text-muted">
+              {editCount} point{editCount > 1 ? "s" : ""} modifié{editCount > 1 ? "s" : ""} ·{" "}
+              <button type="button" onClick={onResetEdits} className="underline underline-offset-2 hover:text-ink">
+                rétablir le tracé
+              </button>
+            </span>
+          )}
+        </div>
+        {issues.length > 0 && (
+          <p className="mt-2 text-[11px] text-[#b2442f]" role="alert">
+            {issues[0]} La 3D garde la dernière version valide ; exports suspendus.
+          </p>
+        )}
       </Section>
 
       {pattern && (
         <Section title="Cotes">
           <dl className="grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-line bg-line text-center text-xs">
-            {(
-              [
-                ["Tour de poitrine", pattern.dims.chestWidth],
-                ["Tour de bas", pattern.dims.hemWidth],
-                ["Longueur", pattern.dims.length],
-                ["Emmanchure", pattern.dims.armhole],
-                ["Tête de manche", pattern.dims.capHeight],
-                ["Tour de bras", pattern.dims.bicep],
-              ] as const
-            ).map(([k, v]) => (
-              <div key={k} className="bg-panel px-1 py-2">
-                <dt className="text-[10px] text-muted">{k}</dt>
-                <dd className="font-semibold tabular-nums">{v.toFixed(1)} cm</dd>
+            {pattern.dims.map(({ label, value }) => (
+              <div key={label} className="bg-panel px-1 py-2">
+                <dt className="text-[10px] text-muted">{label}</dt>
+                <dd className="font-semibold tabular-nums">{value.toFixed(1)} cm</dd>
               </div>
             ))}
           </dl>
@@ -202,30 +237,28 @@ export function PatternPanel({ pattern, params, onParams, autoLength, progress, 
 
       <Section title="Coupe">
         <div className="space-y-4">
-          <RangeField
-            label="Longueur"
-            min={45}
-            max={95}
-            value={params.length > 0 ? params.length : Math.round(autoLength ?? 45)}
-            display={params.length > 0 ? `${params.length} cm` : `auto · ${autoLength?.toFixed(0) ?? "—"} cm`}
-            onChange={(v) => onParams({ ...params, length: v })}
-            onDoubleClick={() => onParams({ ...params, length: 0 })}
-          />
-          {SLIDERS.map((s) => (
-            <RangeField
-              key={s.key}
-              label={s.label}
-              min={s.min}
-              max={s.max}
-              value={params[s.key]}
-              display={`${params[s.key]} cm`}
-              onChange={(v) => onParams({ ...params, [s.key]: v })}
-            />
-          ))}
+          {garment.params.map((s) => {
+            const v = params[s.key];
+            // Automatic settings (value 0): shown at the value worked out from the body.
+            const auto = s.auto && v <= 0 ? (measures ? s.auto(measures) : null) : null;
+            return (
+              <RangeField
+                key={s.key}
+                label={s.label}
+                min={s.min}
+                max={s.max}
+                step={s.step}
+                value={auto ?? (v > 0 || !s.auto ? v : s.min)}
+                display={s.auto && v <= 0 ? `auto · ${auto?.toFixed(0) ?? "—"} cm` : `${v} cm`}
+                onChange={(x) => onParams({ ...params, [s.key]: x })}
+                onDoubleClick={s.auto ? () => onParams({ ...params, [s.key]: 0 }) : undefined}
+              />
+            );
+          })}
         </div>
       </Section>
 
-      <ExportSection pattern={pattern} cutting={cutting} onCutting={onCutting} />
+      <ExportSection pattern={issues.length ? null : pattern} cutting={cutting} onCutting={onCutting} />
 
       <div className="flex items-center gap-3">
         <button

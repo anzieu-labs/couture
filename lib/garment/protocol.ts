@@ -1,6 +1,6 @@
 import type { SkinWeights } from "../avatar/anny";
 import type { TorsoFrame } from "../avatar/bodyMeasures";
-import type { Pattern } from "../pattern/tshirt";
+import type { Pattern } from "../pattern/types";
 import type { SdfGrid } from "../sim/bodySdf";
 import type { ClothModel, ClothParams } from "../sim/model";
 

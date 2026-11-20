@@ -207,7 +207,7 @@ export function sheetToPdf(sheet: Sheet, info: PdfInfo): Uint8Array {
     "3. Couper chaque page le long du cadre, sur ses bords droit et bas.",
     `4. Poser chaque page coupée sur la suivante, bord coupé sur le cadre (les triangles forment des losanges) : ` +
       `${tileName(0, 0)} sur ${tileName(1, 0)}… rangée par rangée, puis les rangées entre elles.`,
-    "Trait plein : coupe. Tirets : couture. Crans : simple = devant, milieux et haut de manche ; double = dos.",
+    "Trait plein : coupe. Tirets : couture. Crans : à faire coïncider d'une pièce à l'autre (doubles côté dos).",
   ];
   for (const s of steps)
     for (const line of wrap(s, 0.36, A4.w - 2 * m)) {

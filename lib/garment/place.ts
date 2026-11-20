@@ -1,6 +1,7 @@
 import type { BodyShape } from "../avatar/anny";
 import type { TorsoFrame } from "../avatar/bodyMeasures";
 import type { GarmentMesh } from "../pattern/mesh";
+import type { GarmentKind } from "../pattern/types";
 
 type V3 = [number, number, number];
 const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -78,11 +79,21 @@ function armPath(shape: BodyShape, side: "L" | "R") {
 
 /**
  * Initial 3D placement before sewing (like the "arrangement points" of a 3D
- * garment CAD): body panels are wrapped on an elliptic cylinder around the
- * torso, sleeves on a tube following each arm (underarm seam at the bottom). Lengths are preserved, so the fabric starts unstretched (unless the
- * garment is narrower than the body, e.g. a tight sleeve).
+ * garment CAD), per garment kind. Lengths are preserved, so the fabric starts
+ * unstretched.
  */
-export function placeGarment(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Float32Array {
+export function placeGarment(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame, kind: GarmentKind): Float32Array {
+  if (kind === "cape") return placeCape(mesh, shape, torso);
+  if (kind === "skirt") return placeSkirt(mesh, torso);
+  return placeTShirt(mesh, shape, torso);
+}
+
+/**
+ * T-shirt: body panels wrapped on an elliptic cylinder around the torso, sleeves
+ * on a tube following each arm (underarm seam at the bottom). Unstretched unless
+ * the garment is narrower than the body (e.g. a tight sleeve).
+ */
+function placeTShirt(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Float32Array {
   const n = mesh.rest.length / 2;
   const out = new Float32Array(n * 3);
   const r = mesh.rest;
@@ -96,7 +107,7 @@ export function placeGarment(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFr
   const wrap = torsoWrap(torso, panelHalfWidth);
   const top = torso.hpsY + 0.02;
 
-  const arms = { "sleeve+": armPath(shape, "L"), "sleeve-": armPath(shape, "R") };
+  const arms: Record<string, ReturnType<typeof armPath>> = { "sleeve+": armPath(shape, "L"), "sleeve-": armPath(shape, "R") };
 
   for (let i = 0; i < n; i++) {
     const id = mesh.pieceIds[mesh.piece[i]];
@@ -116,6 +127,112 @@ export function placeGarment(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFr
       const c = Math.cos(phi) * radius, sn = Math.sin(phi) * radius;
       for (let a = 0; a < 3; a++) out[o + a] = center[a] + up[a] * c + fwd[a] * sn;
     }
+  }
+  return out;
+}
+
+/**
+ * Cape (lib/pattern/cape.ts): the full circle is flat, so it is laid horizontally
+ * around the neck, just above the highest point of the shoulders under it, with
+ * no distortion: the circle's centre (pattern origin) on the neck axis, the back
+ * towards −z, the fronts towards +z. Gravity drapes it once sewn. The hood halves
+ * stand in vertical planes on either side of the head, face edge at the front:
+ * sewing closes the back seam over the head and joins the neck edge to the cape.
+ */
+function placeCape(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Float32Array {
+  const n = mesh.rest.length / 2;
+  const out = new Float32Array(n * 3);
+  const r = mesh.rest;
+  const backIdx = mesh.pieceIds.indexOf("back");
+
+  // Neckline radius = closest back-panel vertex to the circle's centre.
+  let r1 = Infinity;
+  for (let i = 0; i < n; i++) if (mesh.piece[i] === backIdx) r1 = Math.min(r1, Math.hypot(r[2 * i], r[2 * i + 1]));
+
+  // Height: above every body point under the disc near the neck (shoulders, trapezius),
+  // the head excluded (chin and skull are higher up but inside or above the hood).
+  const z0 = torso.neckCenterZ;
+  let top = torso.hpsY;
+  const p = shape.positions;
+  for (let v = 0; v < p.length; v += 3) {
+    const d = Math.hypot(p[v], p[v + 2] - z0);
+    if (d > r1 - 0.01 && d < 0.45 && p[v + 1] < torso.hpsY + 0.05) top = Math.max(top, p[v + 1]);
+  }
+  const capeY = top + 0.015;
+
+  const hx = torso.headHalfWidth + 0.025;
+  const hoodY = capeY + 0.02;
+  const faceZ = torso.headFrontZ + 0.01;
+
+  for (let i = 0; i < n; i++) {
+    const id = mesh.pieceIds[mesh.piece[i]];
+    const x = r[2 * i], y = r[2 * i + 1];
+    const o = 3 * i;
+    if (id === "back") {
+      out[o] = x; out[o + 1] = capeY; out[o + 2] = z0 + y;
+    } else if (id === "front+" || id === "front-") {
+      out[o] = x; out[o + 1] = capeY; out[o + 2] = z0 - y;
+    } else {
+      // hood+: u = x ≥ 0 (towards the back); hood-: its mirror image, u = −x.
+      const left = id === "hood+";
+      out[o] = left ? hx : -hx;
+      out[o + 1] = hoodY + y;
+      out[o + 2] = faceZ - Math.abs(x);
+    }
+  }
+  return out;
+}
+
+/**
+ * Skirt (lib/pattern/skirt.ts): each horizontal row of the panels (pattern y =
+ * height below the waist) is wrapped on an ellipse around the body section at that
+ * height (legs together below the crotch), its quarter perimeter equal to the
+ * row's half width — the waist hugs the waist, the flare stands off the legs. The
+ * slope of an A-line is small: rows to ellipses stretches the fabric by ~2 %.
+ */
+function placeSkirt(mesh: GarmentMesh, torso: TorsoFrame): Float32Array {
+  const n = mesh.rest.length / 2;
+  const out = new Float32Array(n * 3);
+  const r = mesh.rest;
+  const sections = torso.lowerSections;
+  const sectionAt = (y: number) => {
+    const k = Math.min(sections.length - 1, Math.max(0, Math.round((torso.waistY - y) / 0.02)));
+    return sections[k];
+  };
+
+  // Half width of each 1 cm row of each panel.
+  const ROW = 0.01;
+  const rowKey = (p: number, y: number) => p * 100000 + Math.round(-y / ROW);
+  const half = new Map<number, number>();
+  for (let i = 0; i < n; i++) {
+    const k = rowKey(mesh.piece[i], r[2 * i + 1]);
+    half.set(k, Math.max(half.get(k) ?? 0, Math.abs(r[2 * i])));
+  }
+  // Wrap per row (both panels share the side seam: use the wider of the two, so it closes).
+  const wraps = new Map<number, ReturnType<typeof torsoWrap> & { cz: number }>();
+  const wrapFor = (y: number) => {
+    const key = Math.round(-y / ROW);
+    let w = wraps.get(key);
+    if (!w) {
+      const s = sectionAt(torso.waistY + y);
+      let hw = 0;
+      for (let p = 0; p < mesh.pieceIds.length; p++) hw = Math.max(hw, half.get(p * 100000 + key) ?? 0);
+      const frame = { ...torso, halfWidth: s.halfWidth, halfDepth: (s.zMax - s.zMin) / 2 };
+      w = { ...torsoWrap(frame, Math.max(hw, 0.01)), cz: (s.zMax + s.zMin) / 2 };
+      wraps.set(key, w);
+    }
+    return w;
+  };
+
+  for (let i = 0; i < n; i++) {
+    const id = mesh.pieceIds[mesh.piece[i]];
+    const x = r[2 * i], y = r[2 * i + 1];
+    const w = wrapFor(y);
+    const theta = w.angleAt(x);
+    const o = 3 * i;
+    out[o] = w.rx * Math.sin(theta);
+    out[o + 1] = torso.waistY + y;
+    out[o + 2] = w.cz + (id === "front" ? 1 : -1) * w.rz * Math.cos(theta);
   }
   return out;
 }

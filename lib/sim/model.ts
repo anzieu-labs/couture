@@ -34,6 +34,12 @@ export interface ClothParams {
   substeps: number;
   /** Seconds to close the seams; gravity starts afterwards. */
   sewTime: number;
+  /**
+   * Seconds left to the garment to fall into its drape before the body may move.
+   * A cape falls 1.2 m: if the arms start swinging mid-fall, it lands inside them
+   * and gets crushed between arm and torso.
+   */
+  settleTime: number;
   /** Maximum simulated time (s). */
   duration: number;
   /** Velocity damping (1/s). */
@@ -52,6 +58,7 @@ export const DEFAULT_CLOTH: ClothParams = {
   skinGap: 0.003,
   substeps: 20,
   sewTime: 1.2,
+  settleTime: 0,
   duration: 5,
   damping: 1.5,
   selfInterval: 2,
