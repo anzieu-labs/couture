@@ -4,7 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { FEMALE, MALE } from "@/lib/avatar/morphology";
 import { TEXTILES, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
+import type { FitMode } from "@/lib/viewer/fitMap";
 import type { ViewPreset } from "@/lib/viewer/GarmentViewer";
+import { FitLegend } from "./FitLegend";
 import { useGarment } from "./hooks/useGarment";
 import { useMorphology } from "./hooks/useMorphology";
 import { useViewer } from "./hooks/useViewer";
@@ -29,6 +31,12 @@ const VIEW_LABELS: { id: ViewPreset; label: string }[] = [
 
 const PRESETS = { Homme: MALE, Femme: FEMALE };
 
+const DISPLAY_MODES: { id: FitMode | null; label: string; title: string }[] = [
+  { id: null, label: "Tissu", title: "Rendu du tissu" },
+  { id: "tension", label: "Tension", title: "Carte de tension (N/m) : où le vêtement serre" },
+  { id: "stretch", label: "Étirement", title: "Carte d'étirement (%) du tissu" },
+];
+
 const defaultColors = (t: Textile): TextileColors => ({ primary: t.defaultColor, secondary: t.secondary?.default });
 
 export default function Studio() {
@@ -39,6 +47,7 @@ export default function Studio() {
   const [tab, setTab] = useState<Tab>("morpho");
   const [view, setView] = useState<ViewPreset>("face");
   const [autoRotate, setAutoRotate] = useState(false);
+  const [fitMode, setFitMode] = useState<FitMode | null>(null);
 
   // Fabric
   const [textileId, setTextileId] = useState(TEXTILES[0].id);
@@ -60,6 +69,10 @@ export default function Studio() {
     if (ready) viewerRef.current?.setAutoRotate(autoRotate);
   }, [ready, autoRotate, viewerRef]);
 
+  useEffect(() => {
+    if (ready) viewerRef.current?.setFitMap(fitMode);
+  }, [ready, fitMode, viewerRef]);
+
   const goTo = (v: ViewPreset) => {
     setView(v);
     viewerRef.current?.goTo(v);
@@ -71,9 +84,28 @@ export default function Studio() {
       <section className="relative h-[58dvh] shrink-0 md:h-full md:flex-1" aria-label="Aperçu 3D">
         <div ref={viewportRef} className="absolute inset-0" />
 
-        <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2 md:left-6 md:top-5">
-          <span className="text-[11px] font-semibold uppercase tracking-[0.22em] text-ink">Couture</span>
-          <span className="text-[11px] uppercase tracking-[0.18em] text-muted">Atelier 3D</span>
+        <div className="absolute left-4 top-4 flex flex-col items-start gap-3 md:left-6 md:top-5">
+          <div className="pointer-events-none flex items-center gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.22em] text-ink">Couture</span>
+            <span className="text-[11px] uppercase tracking-[0.18em] text-muted">Atelier 3D</span>
+          </div>
+          {simBackend && (
+            <div className="flex items-center gap-1 rounded-full border border-line bg-white/80 p-1 shadow-sm backdrop-blur" role="group" aria-label="Affichage du vêtement">
+              {DISPLAY_MODES.map((m) => (
+                <button
+                  key={m.label}
+                  type="button"
+                  title={m.title}
+                  onClick={() => setFitMode(m.id)}
+                  aria-pressed={fitMode === m.id}
+                  className="rounded-full px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-ink aria-pressed:bg-ink aria-pressed:text-white"
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {fitMode && <FitLegend mode={fitMode} />}
         </div>
 
         <div className="absolute right-4 top-4 flex flex-col items-end gap-1.5 md:right-6 md:top-5">

@@ -183,10 +183,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   );
   let gl = length(g);
   g = select(vec3f(0.0, 1.0, 0.0), g / gl, gl > 0.0);
-  p += g * (frame.offset - d);
-  // Coulomb-like friction: cancel part of the tangential motion of this substep.
+  let push = frame.offset - d;
+  p += g * push;
+  // Coulomb friction (Macklin et al. 2014), proportional to the contact push:
+  // static below μ·push of tangential motion, kinetic above.
   let m = p - vec3f(prev[3u * i], prev[3u * i + 1u], prev[3u * i + 2u]);
-  p -= (m - dot(m, g) * g) * frame.friction;
+  let t = m - dot(m, g) * g;
+  let lt = length(t);
+  let limit = frame.friction * push;
+  p -= t * select(limit / lt, 1.0, lt <= limit);
   pos[3u * i] = p.x;
   pos[3u * i + 1u] = p.y;
   pos[3u * i + 2u] = p.z;

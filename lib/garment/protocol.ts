@@ -35,6 +35,8 @@ export interface GarmentGeometry {
   band: Float32Array;
   /** Fabric thickness (m). */
   thickness: number;
+  /** Tensile moduli (N/m), for the fit map. */
+  tensile: { warp: number; weft: number };
   /** Positions before sewing. */
   initial: Float32Array;
 }

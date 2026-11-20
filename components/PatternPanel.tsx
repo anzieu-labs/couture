@@ -86,8 +86,8 @@ function PatternSvg({ pattern }: { pattern: Pattern }) {
 }
 
 const SLIDERS: { key: keyof TShirtParams; label: string; min: number; max: number }[] = [
-  { key: "chestEase", label: "Aisance poitrine", min: 0, max: 30 },
-  { key: "sleeveEase", label: "Aisance manche", min: 2, max: 16 },
+  { key: "chestEase", label: "Aisance poitrine", min: -12, max: 30 },
+  { key: "sleeveEase", label: "Aisance manche", min: -4, max: 16 },
   { key: "sleeveLength", label: "Longueur de manche", min: 12, max: 40 },
 ];
 

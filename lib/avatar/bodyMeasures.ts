@@ -11,6 +11,8 @@ export interface TorsoFrame {
   /** Heights (m, body frame). */
   hpsY: number;
   armpitY: number;
+  /** Mean radius of the upper arm (m). */
+  upperArmRadius: number;
 }
 
 /** Measurements needed to draft and place a top garment. */
@@ -35,13 +37,14 @@ export function measureForPattern(
     return nearest ? convexHullPerimeter(nearest.pts) : 0;
   };
 
+  const upperArm = (arm("L") + arm("R")) / 2;
   return {
     measures: {
       bust: body.bust,
       waist: body.waist,
       hips: body.hips,
       neck: torsoSection(slicer, j["neck01"][1] + 0.015).girth * 100,
-      upperArm: ((arm("L") + arm("R")) / 2) * 100,
+      upperArm: upperArm * 100,
       shoulderWidth: (Math.abs(j["upperarm01.L"][0] - j["upperarm01.R"][0]) + 0.08) * 100,
       hpsToArmpit: (hpsY - body.armpitY) * 100,
       hpsToHip: (hpsY - hipY) * 100,
@@ -52,6 +55,7 @@ export function measureForPattern(
       centerZ: (body.chest.zMax + body.chest.zMin) / 2,
       hpsY,
       armpitY: body.armpitY,
+      upperArmRadius: upperArm / (2 * Math.PI),
     },
   };
 }

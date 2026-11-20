@@ -78,7 +78,33 @@ export class BodySdf implements SdfGrid {
       if (k > 0) push(c - nx * ny);
       if (k < nz - 1) push(c + nx * ny);
     }
-    for (let c = 0; c < n; c++) if (Number.isNaN(sdf[c])) sdf[c] = outside[c] ? band : -band;
+    for (let c = 0; c < n; c++) if (Number.isNaN(sdf[c]) && outside[c]) sdf[c] = band;
+
+    // Deep inside: distance transform (breadth-first, one cell per layer) from
+    // the band, so the field keeps pointing outwards. A constant value there
+    // would have no gradient, and a vertex pushed deep inside would never come out.
+    const layer: number[] = [];
+    for (let c = 0; c < n; c++) if (Number.isNaN(sdf[c])) layer.push(c);
+    const inside = new Set(layer);
+    let frontier = layer.filter((c) => {
+      const i = c % nx, j = Math.floor(c / nx) % ny, k = Math.floor(c / (nx * ny));
+      const near = (d: number) => !inside.has(c + d);
+      return (i > 0 && near(-1)) || (i < nx - 1 && near(1)) || (j > 0 && near(-nx)) || (j < ny - 1 && near(nx)) ||
+        (k > 0 && near(-nx * ny)) || (k < nz - 1 && near(nx * ny));
+    });
+    for (let depth = 1; frontier.length; depth++) {
+      for (const c of frontier) {
+        sdf[c] = -band - (depth - 1) * h;
+        inside.delete(c);
+      }
+      const next = new Set<number>();
+      for (const c of frontier) {
+        const i = c % nx, j = Math.floor(c / nx) % ny, k = Math.floor(c / (nx * ny));
+        for (const [ok, d] of [[i > 0, -1], [i < nx - 1, 1], [j > 0, -nx], [j < ny - 1, nx], [k > 0, -nx * ny], [k < nz - 1, nx * ny]] as const)
+          if (ok && inside.has(c + d)) next.add(c + d);
+      }
+      frontier = [...next];
+    }
   }
 
   /** Trilinear distance; large positive outside the grid. */

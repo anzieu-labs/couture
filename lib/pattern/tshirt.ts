@@ -23,7 +23,7 @@ export interface BodyMeasures {
 }
 
 export interface TShirtParams {
-  /** Total chest ease (cm). */
+  /** Total chest ease (cm); negative for close-fitting knits. */
   chestEase: number;
   /** Total length HPS → hem (cm); 0 = automatic (just below the hip joint). */
   length: number;

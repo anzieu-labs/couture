@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { FIT_MODE_INDEX, FIT_SCALES, fitWGSL, restInverses, type FitMode, type Tensile } from "./fitMap";
 import { shellTopology } from "./shellTopology";
 
 const WORKGROUP = 64;
@@ -10,24 +11,55 @@ struct Counts { n: u32, nRim: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(2) var<storage, read> start: array<u32>;
 @group(0) @binding(3) var<storage, read> list: array<u32>;
 @group(0) @binding(4) var<storage, read_write> nrm: array<f32>;
-@group(0) @binding(5) var<uniform> counts: Counts;
+@group(0) @binding(5) var<storage, read> restInv: array<vec4f>;
+@group(0) @binding(6) var<storage, read_write> fit: array<f32>;
+@group(0) @binding(7) var<uniform> counts: Counts;
+@group(0) @binding(8) var<uniform> fp: FitParams;
+${fitWGSL}
 fn P(i: u32) -> vec3f { return vec3f(pos[3u * i], pos[3u * i + 1u], pos[3u * i + 2u]); }
 @compute @workgroup_size(${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let i = id.x;
   if (i >= counts.n) { return; }
-  // Area-weighted sum of the normals of the incident triangles.
+  // Area-weighted sum of the normals of the incident triangles, and mean fit value.
   var s = vec3f(0.0);
+  var f = 0.0;
   for (var k = start[i]; k < start[i + 1u]; k++) {
-    let t = 3u * list[k];
+    let tri = list[k];
+    let t = 3u * tri;
     let a = P(tris[t]);
-    s += cross(P(tris[t + 1u]) - a, P(tris[t + 2u]) - a);
+    let e1 = P(tris[t + 1u]) - a;
+    let e2 = P(tris[t + 2u]) - a;
+    s += cross(e1, e2);
+    f += triangleFit(e1, e2, restInv[tri], fp);
   }
   let l = length(s);
   let n = select(vec3f(0.0, 1.0, 0.0), s / l, l > 0.0);
   nrm[3u * i] = n.x;
   nrm[3u * i + 1u] = n.y;
   nrm[3u * i + 2u] = n.z;
+  fit[i] = f / f32(max(1u, start[i + 1u] - start[i]));
+}`;
+
+/** One smoothing pass of the fit values: mean over the incident triangles' vertices. */
+const smoothWGSL = /* wgsl */ `
+struct Counts { n: u32, nRim: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<storage, read> fit: array<f32>;
+@group(0) @binding(1) var<storage, read> tris: array<u32>;
+@group(0) @binding(2) var<storage, read> start: array<u32>;
+@group(0) @binding(3) var<storage, read> list: array<u32>;
+@group(0) @binding(4) var<storage, read_write> smoothed: array<f32>;
+@group(0) @binding(5) var<uniform> counts: Counts;
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  if (i >= counts.n) { return; }
+  var s = 0.0;
+  for (var k = start[i]; k < start[i + 1u]; k++) {
+    let t = 3u * list[k];
+    s += fit[tris[t]] + fit[tris[t + 1u]] + fit[tris[t + 2u]];
+  }
+  smoothed[i] = s / f32(3u * max(1u, start[i + 1u] - start[i]));
 }`;
 
 const shellWGSL = /* wgsl */ `
@@ -38,12 +70,18 @@ struct Counts { n: u32, nRim: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(3) var<storage, read> thick: array<f32>;
 @group(0) @binding(4) var<storage, read_write> outPos: array<f32>;
 @group(0) @binding(5) var<storage, read_write> outNrm: array<f32>;
-@group(0) @binding(6) var<uniform> counts: Counts;
+@group(0) @binding(6) var<storage, read> fit: array<f32>;
+@group(0) @binding(7) var<storage, read_write> outCol: array<f32>;
+@group(0) @binding(8) var<uniform> counts: Counts;
+@group(0) @binding(9) var<uniform> fp: FitParams;
+${fitWGSL}
 fn P(i: u32) -> vec3f { return vec3f(pos[3u * i], pos[3u * i + 1u], pos[3u * i + 2u]); }
 fn N(i: u32) -> vec3f { return vec3f(nrm[3u * i], nrm[3u * i + 1u], nrm[3u * i + 2u]); }
-fn put(v: u32, p: vec3f, n: vec3f) {
+fn put(v: u32, p: vec3f, n: vec3f, f: f32) {
   outPos[3u * v] = p.x; outPos[3u * v + 1u] = p.y; outPos[3u * v + 2u] = p.z;
   outNrm[3u * v] = n.x; outNrm[3u * v + 1u] = n.y; outNrm[3u * v + 2u] = n.z;
+  let c = fitColor(f, fp);
+  outCol[3u * v] = c.x; outCol[3u * v + 1u] = c.y; outCol[3u * v + 2u] = c.z;
 }
 @compute @workgroup_size(${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -53,8 +91,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let i = id.x;
     let p = P(i);
     let d = N(i);
-    put(i, p + d * thick[i], d);
-    put(n + i, p - d * thick[i], -d);
+    put(i, p + d * thick[i], d, fit[i]);
+    put(n + i, p - d * thick[i], -d, fit[i]);
     return;
   }
   let r = id.x - n;
@@ -68,23 +106,28 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let nb = N(b);
   let side = normalize(cross(pb - pa, na + nb));
   let o = 2u * n + 4u * r;
-  put(o, pa + na * thick[a], side);
-  put(o + 1u, pb + nb * thick[b], side);
-  put(o + 2u, pb - nb * thick[b], side);
-  put(o + 3u, pa - na * thick[a], side);
+  put(o, pa + na * thick[a], side, fit[a]);
+  put(o + 1u, pb + nb * thick[b], side, fit[b]);
+  put(o + 2u, pb - nb * thick[b], side, fit[b]);
+  put(o + 3u, pa - na * thick[a], side, fit[a]);
 }`;
 
 /**
  * GPU version of the rendered cloth solid: normals and the thick shell (outer
  * face, inner face, rims) are computed by compute shaders on the renderer's
- * device, straight into the vertex buffers three.js draws — the simulated
+ * device, straight into the vertex buffers three.js draws (positions, normals,
+ * and fit-map colours used when the fit map is shown) — the simulated
  * positions never leave the GPU.
  */
 export class GpuClothShell {
   readonly geometry = new THREE.BufferGeometry();
   private readonly buffers: GPUBuffer[] = [];
   private readonly normals: { pipeline: GPUComputePipeline; group: GPUBindGroup; count: number };
+  private readonly smooth: { pipeline: GPUComputePipeline; group: GPUBindGroup; count: number };
   private readonly shell: { pipeline: GPUComputePipeline; group: GPUBindGroup; count: number };
+  private readonly fitParams: GPUBuffer;
+  private readonly device: GPUDevice;
+  private readonly tensile: Tensile;
 
   constructor(
     renderer: THREE.WebGPURenderer,
@@ -92,11 +135,14 @@ export class GpuClothShell {
     triangles: Uint32Array,
     band: Float32Array,
     thickness: number,
+    tensile: Tensile,
     positions: GPUBuffer,
   ) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const backend = renderer.backend as any;
     const device: GPUDevice = backend.device;
+    this.device = device;
+    this.tensile = tensile;
     const topo = shellTopology(rest, triangles, band, thickness);
     const { n, rim } = topo;
     const nRim = rim.length / 2;
@@ -105,15 +151,19 @@ export class GpuClothShell {
     // so that compute shaders can write them; three.js reuses these buffers.
     const position = new THREE.BufferAttribute(new Float32Array(topo.vertexCount * 3), 3);
     const normal = new THREE.BufferAttribute(new Float32Array(topo.vertexCount * 3), 3);
+    const color = new THREE.BufferAttribute(new Float32Array(topo.vertexCount * 3), 3);
     this.geometry.setAttribute("position", position);
     this.geometry.setAttribute("normal", normal);
+    this.geometry.setAttribute("color", color);
     this.geometry.setAttribute("uv", new THREE.BufferAttribute(topo.uv, 2));
     this.geometry.setIndex(new THREE.BufferAttribute(topo.index, 1));
     this.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 2);
     backend.createStorageAttribute(position);
     backend.createStorageAttribute(normal);
+    backend.createStorageAttribute(color);
     const outPos: GPUBuffer = backend.get(position).buffer;
     const outNrm: GPUBuffer = backend.get(normal).buffer;
+    const outCol: GPUBuffer = backend.get(color).buffer;
 
     // Vertex → incident triangles (CSR), so normals are gathered without atomics.
     const start = new Uint32Array(n + 1);
@@ -133,6 +183,11 @@ export class GpuClothShell {
     const rimBuf = upload(rim), thick = upload(topo.halfThickness);
     const nrm = upload(new Float32Array(3 * n));
     const counts = upload(new Uint32Array([n, nRim, 0, 0]), GPUBufferUsage.UNIFORM);
+    const restInv = upload(restInverses(rest, triangles));
+    const fit = upload(new Float32Array(n));
+    const smoothed = upload(new Float32Array(n));
+    this.fitParams = upload(new Float32Array(4), GPUBufferUsage.UNIFORM);
+    this.setFitMode("tension");
 
     const stage = (code: string, resources: GPUBuffer[], count: number) => {
       const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
@@ -142,14 +197,23 @@ export class GpuClothShell {
       });
       return { pipeline, group, count };
     };
-    this.normals = stage(normalsWGSL, [positions, tris, startBuf, listBuf, nrm, counts], n);
-    this.shell = stage(shellWGSL, [positions, nrm, rimBuf, thick, outPos, outNrm, counts], n + nRim);
+    this.normals = stage(normalsWGSL, [positions, tris, startBuf, listBuf, nrm, restInv, fit, counts, this.fitParams], n);
+    this.smooth = stage(smoothWGSL, [fit, tris, startBuf, listBuf, smoothed, counts], n);
+    this.shell = stage(shellWGSL, [positions, nrm, rimBuf, thick, outPos, outNrm, smoothed, outCol, counts, this.fitParams], n + nRim);
+  }
+
+  /** Selects what the fit-map colours show (applied at the next `encode`). */
+  setFitMode(mode: FitMode) {
+    const data = new ArrayBuffer(16);
+    new Uint32Array(data, 0, 1)[0] = FIT_MODE_INDEX[mode];
+    new Float32Array(data, 4, 3).set([FIT_SCALES[mode].max, this.tensile.warp, this.tensile.weft]);
+    this.device.queue.writeBuffer(this.fitParams, 0, data);
   }
 
   /** Appends the normal and shell passes to `encoder`. */
   encode(encoder: GPUCommandEncoder) {
     const pass = encoder.beginComputePass();
-    for (const { pipeline, group, count } of [this.normals, this.shell]) {
+    for (const { pipeline, group, count } of [this.normals, this.smooth, this.shell]) {
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));

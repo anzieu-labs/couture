@@ -47,7 +47,7 @@ export const DEFAULT_CLOTH: ClothParams = {
   thickness: 0.0006,
   friction: 0.4,
   skinGap: 0.003,
-  substeps: 10,
+  substeps: 20,
   sewTime: 1.2,
   duration: 5,
   damping: 1.5,
@@ -57,6 +57,14 @@ export const DEFAULT_CLOTH: ClothParams = {
 const REFERENCE_LOAD = 20;
 const MAX_TENSILE = 2e4;
 const HEM_BENDING_FACTOR = 4;
+
+/** Tensile moduli (N/m) along the warp (pattern y) and the weft (pattern x). */
+export function tensileModuli(p: ClothParams): { warp: number; weft: number } {
+  return {
+    warp: Math.min(MAX_TENSILE, REFERENCE_LOAD / (p.stretchWarp / 100)),
+    weft: Math.min(MAX_TENSILE, REFERENCE_LOAD / (p.stretchWeft / 100)),
+  };
+}
 
 /** [start, count] of each colour in a colour-sorted constraint array. */
 export type ColorRanges = [number, number][];
@@ -162,8 +170,7 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
     }
   }
 
-  const yWarp = Math.min(MAX_TENSILE, REFERENCE_LOAD / (p.stretchWarp / 100));
-  const yWeft = Math.min(MAX_TENSILE, REFERENCE_LOAD / (p.stretchWeft / 100));
+  const { warp: yWarp, weft: yWeft } = tensileModuli(p);
   const edges: number[] = [], rest: number[] = [], comp: number[] = [];
   const bIdx: number[] = [], bK: number[] = [], bComp: number[] = [];
   // cotangent of the angle at o between oa and ob

@@ -132,12 +132,17 @@ export class CpuClothSolver {
       sdf.gradient(pos[i], pos[i + 1], pos[i + 2], grad);
       const push = offset - d;
       pos[i] += grad[0] * push; pos[i + 1] += grad[1] * push; pos[i + 2] += grad[2] * push;
-      // Coulomb-like friction: cancel part of the tangential motion of this substep.
+      // Coulomb friction (Macklin et al. 2014), proportional to the contact push:
+      // static below μ·push of tangential motion, kinetic above.
       const mx = pos[i] - prev[i], my = pos[i + 1] - prev[i + 1], mz = pos[i + 2] - prev[i + 2];
       const mn = mx * grad[0] + my * grad[1] + mz * grad[2];
-      pos[i] -= (mx - mn * grad[0]) * p.friction;
-      pos[i + 1] -= (my - mn * grad[1]) * p.friction;
-      pos[i + 2] -= (mz - mn * grad[2]) * p.friction;
+      const tx = mx - mn * grad[0], ty = my - mn * grad[1], tz = mz - mn * grad[2];
+      const lt = Math.sqrt(tx * tx + ty * ty + tz * tz);
+      const limit = p.friction * push;
+      const k = lt <= limit ? 1 : limit / lt;
+      pos[i] -= tx * k;
+      pos[i + 1] -= ty * k;
+      pos[i + 2] -= tz * k;
     }
   }
 }

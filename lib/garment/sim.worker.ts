@@ -2,7 +2,7 @@
 import { meshPattern } from "../pattern/mesh";
 import { BodySdf } from "../sim/bodySdf";
 import { CpuClothSolver } from "../sim/cloth";
-import { buildClothModel, DEFAULT_CLOTH, RestDetector } from "../sim/model";
+import { buildClothModel, DEFAULT_CLOTH, RestDetector, tensileModuli } from "../sim/model";
 import { orientOutward } from "./orient";
 import { placeGarment } from "./place";
 import type { DressRequest, GarmentGeometry, WorkerRequest, WorkerResponse } from "./protocol";
@@ -20,6 +20,11 @@ const FRAME_DT = 1 / 60;
 const POST_INTERVAL_MS = 16;
 /** Mesh resolution (cm): the GPU affords a finer mesh, hence finer folds. */
 const SPACING = { gpu: 1.0, cpu: 1.5 };
+/**
+ * Substeps: stiffness only converges with small steps (stretch error ∝ h²).
+ * The CPU fallback trades some accuracy (slightly stretchier cloth) for speed.
+ */
+const SUBSTEPS = { gpu: 20, cpu: 10 };
 
 let current = 0;
 const post = (msg: WorkerResponse, transfer: Transferable[] = []) => ctx.postMessage(msg, transfer);
@@ -41,11 +46,18 @@ async function dress(req: DressRequest) {
   min[1] -= 0.25;
   const sdf = new BodySdf(body.positions, body.normals, min, max);
   orientOutward(mesh, initial, sdf);
-  const params = { ...DEFAULT_CLOTH, ...req.cloth };
+  const params = { ...DEFAULT_CLOTH, substeps: SUBSTEPS[mode], ...req.cloth };
   const model = buildClothModel(mesh, initial, params);
   if (id !== current) return;
 
-  const geometry: GarmentGeometry = { rest: mesh.rest, triangles: mesh.triangles, band: mesh.band, thickness: params.thickness, initial };
+  const geometry: GarmentGeometry = {
+    rest: mesh.rest,
+    triangles: mesh.triangles,
+    band: mesh.band,
+    thickness: params.thickness,
+    tensile: tensileModuli(params),
+    initial,
+  };
   if (mode === "gpu") {
     const grid = { data: sdf.data, nx: sdf.nx, ny: sdf.ny, nz: sdf.nz, min: sdf.min, h: sdf.h };
     post({ type: "model", id, model, sdf: grid, ...geometry });

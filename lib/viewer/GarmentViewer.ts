@@ -16,6 +16,7 @@ import type { GarmentGeometry } from "../garment/protocol";
 import type { SdfGrid } from "../sim/bodySdf";
 import type { ClothModel } from "../sim/model";
 import { ClothShell } from "./ClothShell";
+import type { FitMode } from "./fitMap";
 import { GpuClothShell } from "./GpuClothShell";
 import { FabricMaterial } from "./FabricMaterial";
 
@@ -47,6 +48,8 @@ interface Garment {
   cpu?: ClothShell;
   /** GPU mode: simulated and rebuilt on the GPU every frame. */
   gpu?: { solver: GpuClothSolver; shell: GpuClothShell; duration: number; sewTime: number; done: boolean; still: number; lastMotion: number };
+  /** Switches the fit-map quantity and refreshes the colours. */
+  setFitMode: (mode: FitMode) => void;
   dispose: () => void;
 }
 
@@ -82,6 +85,9 @@ export class GarmentViewer {
   private readonly fabric: FabricMaterial;
   private readonly simulator: GarmentSimulator;
   private garment: Garment | null = null;
+  /** null: fabric rendering; otherwise the fit map is shown. */
+  private fitMode: FitMode | null = null;
+  private readonly fitMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 });
   private shape: BodyShape | null = null;
   private slicer: MeshSlicer | null = null;
   private tween: Tween | null = null;
@@ -222,13 +228,28 @@ export class GarmentViewer {
     garment.mesh.castShadow = garment.mesh.receiveShadow = true;
     this.figure.add(garment.mesh);
     this.garment = garment;
+    this.setFitMap(this.fitMode);
+  }
+
+  /** Shows the fit map (tension or stretch) instead of the fabric, or back (null). */
+  setFitMap(mode: FitMode | null) {
+    this.fitMode = mode;
+    const g = this.garment;
+    if (!g) return;
+    g.mesh.material = mode ? this.fitMaterial : this.fabric.material;
+    if (mode) g.setFitMode(mode);
   }
 
   /** CPU mode: the worker simulates and streams positions; the shell is built here. */
   private showCpuGarment(g: GarmentGeometry) {
-    const shell = new ClothShell(g.rest, g.triangles, g.band, g.thickness);
+    const shell = new ClothShell(g.rest, g.triangles, g.band, g.thickness, g.tensile);
     shell.update(g.initial);
-    this.addGarment({ mesh: new THREE.Mesh(shell.geometry, this.fabric.material), cpu: shell, dispose: () => shell.dispose() });
+    this.addGarment({
+      mesh: new THREE.Mesh(shell.geometry, this.fabric.material),
+      cpu: shell,
+      setFitMode: (mode) => shell.setFitMode(mode),
+      dispose: () => shell.dispose(),
+    });
     this.onSimBackend?.("cpu");
   }
 
@@ -242,15 +263,22 @@ export class GarmentViewer {
     const device = this.gpuDevice;
     if (!device) return;
     const solver = new GpuClothSolver(device, model, g.initial, sdf);
-    const shell = new GpuClothShell(this.renderer, g.rest, g.triangles, g.band, g.thickness, solver.positions);
-    const encoder = device.createCommandEncoder();
-    shell.encode(encoder);
-    device.queue.submit([encoder.finish()]);
+    const shell = new GpuClothShell(this.renderer, g.rest, g.triangles, g.band, g.thickness, g.tensile, solver.positions);
+    const rebuildShell = () => {
+      const encoder = device.createCommandEncoder();
+      shell.encode(encoder);
+      device.queue.submit([encoder.finish()]);
+    };
+    rebuildShell();
     const mesh = new THREE.Mesh(shell.geometry, this.fabric.material);
     mesh.frustumCulled = false;
     this.addGarment({
       mesh,
       gpu: { solver, shell, duration: model.params.duration, sewTime: model.params.sewTime, done: false, still: 0, lastMotion: -1 },
+      setFitMode: (mode) => {
+        shell.setFitMode(mode);
+        rebuildShell(); // the simulation may be over: refresh the colours now
+      },
       dispose: () => {
         solver.dispose();
         shell.dispose();
@@ -372,6 +400,7 @@ export class GarmentViewer {
     this.controls.dispose();
     this.simulator.dispose();
     this.removeGarment();
+    this.fitMaterial.dispose();
     this.fabric.dispose();
     this.scene.traverse((o) => {
       if (o instanceof THREE.Mesh) {
