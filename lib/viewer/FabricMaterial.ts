@@ -34,7 +34,6 @@ export class FabricMaterial {
     this.albedo = make(this.albedoCanvas, "#ffffff", THREE.SRGBColorSpace);
     this.normal = make(this.normalCanvas, "#8080ff", THREE.NoColorSpace);
     this.material = new THREE.MeshPhysicalMaterial({
-      side: THREE.DoubleSide,
       map: this.albedo,
       normalMap: this.normal,
       sheenColor: new THREE.Color("#ffffff"),

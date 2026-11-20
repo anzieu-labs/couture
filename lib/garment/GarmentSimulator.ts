@@ -2,7 +2,10 @@ import type { DressRequest, WorkerRequest, WorkerResponse } from "./protocol";
 
 export interface SimulatorEvents {
   /** A new garment mesh (flat rest coordinates double as UVs). */
-  onMesh: (mesh: { rest: Float32Array; triangles: Uint32Array; positions: Float32Array }) => void;
+  /** CPU mode: a new garment whose positions will follow through `onFrame`. */
+  onMesh: (mesh: Extract<WorkerResponse, { type: "mesh" }>) => void;
+  /** GPU mode: a prepared cloth model to simulate on the renderer's device. */
+  onModel: (model: Extract<WorkerResponse, { type: "model" }>) => void;
   onFrame: (positions: Float32Array, progress: number) => void;
 }
 
@@ -17,6 +20,7 @@ export class GarmentSimulator {
       const msg = e.data;
       if (msg.id !== this.id) return; // stale
       if (msg.type === "mesh") this.events.onMesh(msg);
+      else if (msg.type === "model") this.events.onModel(msg);
       else if (msg.type === "frame") this.events.onFrame(msg.positions, msg.progress);
       else console.error("Garment simulation failed:", msg.message);
     };

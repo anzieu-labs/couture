@@ -33,7 +33,7 @@ const defaultColors = (t: Textile): TextileColors => ({ primary: t.defaultColor,
 
 export default function Studio() {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const { viewerRef, status, backend, simProgress } = useViewer(viewportRef);
+  const { viewerRef, status, backend, simProgress, simBackend } = useViewer(viewportRef);
   const ready = status === "ready";
 
   const [tab, setTab] = useState<Tab>("morpho");
@@ -76,14 +76,28 @@ export default function Studio() {
           <span className="text-[11px] uppercase tracking-[0.18em] text-muted">Atelier 3D</span>
         </div>
 
-        {backend && (
-          <span
-            className="absolute right-4 top-4 rounded-full border border-line bg-white/70 px-2.5 py-1 text-[11px] text-muted backdrop-blur md:right-6 md:top-5"
-            title={backend === "WebGPU" ? "Rendu accéléré WebGPU" : "WebGPU indisponible : repli automatique sur WebGL 2"}
-          >
-            Rendu {backend}
-          </span>
-        )}
+        <div className="absolute right-4 top-4 flex flex-col items-end gap-1.5 md:right-6 md:top-5">
+          {backend && (
+            <span
+              className="rounded-full border border-line bg-white/70 px-2.5 py-1 text-[11px] text-muted backdrop-blur"
+              title={backend === "WebGPU" ? "Rendu accéléré WebGPU" : "WebGPU indisponible : repli automatique sur WebGL 2"}
+            >
+              Rendu {backend}
+            </span>
+          )}
+          {simBackend && (
+            <span
+              className="rounded-full border border-line bg-white/70 px-2.5 py-1 text-[11px] text-muted backdrop-blur"
+              title={
+                simBackend === "gpu"
+                  ? "Tissu simulé sur la carte graphique (WebGPU compute)"
+                  : "WebGPU indisponible pour le calcul : simulation sur le processeur"
+              }
+            >
+              Simulation {simBackend.toUpperCase()}
+            </span>
+          )}
+        </div>
 
         {!ready && (
           <div className="absolute inset-0 grid place-items-center">

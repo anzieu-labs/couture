@@ -32,20 +32,23 @@ export function useGarment(
     setPattern(draftTShirt(inputs.measures, params));
   }, [ready, measurements, params, viewerRef]);
 
-  // Only the mechanical properties matter here: re-sew on textile *id* changes, not colours.
-  const { weight, mechanics } = textile;
+  // Only the mechanical properties matter here: re-sew on textile changes, not colours.
+  const { weight, bending, stretch, thickness, friction } = textile;
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!ready || !viewer || !pattern || !torso.current) return;
     const timer = setTimeout(() => {
       viewer.dress(pattern, torso.current!, {
         density: weight / 1000,
-        stretchCompliance: mechanics.stretchCompliance,
-        bendCompliance: mechanics.bendCompliance,
+        bending,
+        stretchWarp: stretch.warp,
+        stretchWeft: stretch.weft,
+        thickness: thickness / 1000,
+        friction,
       });
     }, DRESS_DELAY);
     return () => clearTimeout(timer);
-  }, [ready, pattern, weight, mechanics, sewCount, viewerRef]);
+  }, [ready, pattern, weight, bending, stretch, thickness, friction, sewCount, viewerRef]);
 
   return { params, setParams, pattern, autoLength, resew: () => setSewCount((c) => c + 1) };
 }

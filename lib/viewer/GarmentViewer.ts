@@ -8,9 +8,15 @@ import { measureBody, type BodyMeasurement } from "../avatar/measure";
 import { GarmentSimulator } from "../garment/GarmentSimulator";
 import { MeshSlicer } from "../geometry/slice";
 import type { BodyMeasures, Pattern } from "../pattern/tshirt";
-import type { ClothParams } from "../sim/cloth";
+import type { ClothParams } from "../sim/model";
 import type { Textile } from "../textiles/catalog";
 import type { TextileColors } from "../textiles/generate";
+import { GpuClothSolver } from "../sim/gpu/GpuClothSolver";
+import type { GarmentGeometry } from "../garment/protocol";
+import type { SdfGrid } from "../sim/bodySdf";
+import type { ClothModel } from "../sim/model";
+import { ClothShell } from "./ClothShell";
+import { GpuClothShell } from "./GpuClothShell";
 import { FabricMaterial } from "./FabricMaterial";
 
 export type ViewPreset = "face" | "profil" | "dos" | "buste";
@@ -23,6 +29,27 @@ const VIEWS: Record<ViewPreset, { pos: [number, number, number]; target: [number
   buste: { pos: [0.55, 1.42, 1.85], target: [0, 1.2, 0] },
 };
 
+/**
+ * GPU mode pacing: as many simulated frames per rendered frame as the display
+ * allows while staying above ~45 fps (adjusted from the measured frame interval).
+ */
+const SIM_FRAMES = { initial: 3, min: 2, max: 24 };
+const FRAME_INTERVAL = { raise: 19, lower: 24 }; // ms
+/**
+ * At rest: mean vertex speed below 3 mm/s and max below 3 cm/s. Measurements
+ * are sparse (asynchronous read-back behind queued GPU work), so one suffices.
+ */
+const REST = { mean: 0.003, max: 0.03, count: 1 };
+
+interface Garment {
+  mesh: THREE.Mesh;
+  /** CPU mode: shell rebuilt from streamed positions. */
+  cpu?: ClothShell;
+  /** GPU mode: simulated and rebuilt on the GPU every frame. */
+  gpu?: { solver: GpuClothSolver; shell: GpuClothShell; duration: number; sewTime: number; done: boolean; still: number; lastMotion: number };
+  dispose: () => void;
+}
+
 interface Tween {
   t0: number;
   from: THREE.Spherical;
@@ -34,12 +61,16 @@ interface Tween {
 /**
  * Three.js scene: WebGPU renderer (automatic WebGL 2 fallback), studio lighting,
  * parametric Anny mannequin (morphology computed on the CPU) and a garment
- * sewn from its flat pattern and draped in a worker (XPBD cloth solver).
+ * sewn from its flat pattern and draped by an XPBD cloth solver — on the
+ * renderer's GPU with WebGPU (simulation + thick shell, no read-back), else on
+ * the CPU in a worker.
  */
 export class GarmentViewer {
   readonly backend: "WebGPU" | "WebGL 2";
   /** Called with the sewing/draping progress (0..1). */
   onSimProgress?: (progress: number) => void;
+  /** Called when a garment starts simulating, with where it runs. */
+  onSimBackend?: (backend: "gpu" | "cpu") => void;
 
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
@@ -50,10 +81,12 @@ export class GarmentViewer {
   private readonly body: THREE.Mesh;
   private readonly fabric: FabricMaterial;
   private readonly simulator: GarmentSimulator;
-  private garment: THREE.Mesh | null = null;
+  private garment: Garment | null = null;
   private shape: BodyShape | null = null;
   private slicer: MeshSlicer | null = null;
   private tween: Tween | null = null;
+  private lastFrameTime = 0;
+  private simFrames = SIM_FRAMES.initial;
 
   static async create(container: HTMLElement): Promise<GarmentViewer> {
     const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -105,7 +138,8 @@ export class GarmentViewer {
 
     this.fabric = new FabricMaterial(renderer.getMaxAnisotropy());
     this.simulator = new GarmentSimulator({
-      onMesh: (m) => this.showGarment(m.rest, m.triangles, m.positions),
+      onMesh: (m) => this.showCpuGarment(m),
+      onModel: (m) => this.startGpuGarment(m, m.model, m.sdf),
       onFrame: (positions, progress) => this.updateGarment(positions, progress),
     });
 
@@ -160,6 +194,7 @@ export class GarmentViewer {
   dress(pattern: Pattern, torso: TorsoFrame, cloth: Partial<ClothParams> = {}) {
     if (!this.shape) return;
     this.simulator.dress({
+      mode: this.gpuDevice ? "gpu" : "cpu",
       pattern,
       torso,
       cloth,
@@ -176,33 +211,77 @@ export class GarmentViewer {
     this.fabric.set(textile, colors, scale);
   }
 
-  private showGarment(rest: Float32Array, triangles: Uint32Array, positions: Float32Array) {
+  /** The renderer's WebGPU device (null with the WebGL 2 fallback). */
+  private get gpuDevice(): GPUDevice | null {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return this.backend === "WebGPU" ? ((this.renderer.backend as any).device ?? null) : null;
+  }
+
+  private addGarment(garment: Garment) {
     this.removeGarment();
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geo.setAttribute("uv", new THREE.BufferAttribute(rest, 2));
-    geo.setIndex(new THREE.BufferAttribute(triangles, 1));
-    geo.computeVertexNormals();
-    this.garment = new THREE.Mesh(geo, this.fabric.material);
-    this.garment.castShadow = this.garment.receiveShadow = true;
-    this.figure.add(this.garment);
+    garment.mesh.castShadow = garment.mesh.receiveShadow = true;
+    this.figure.add(garment.mesh);
+    this.garment = garment;
+  }
+
+  /** CPU mode: the worker simulates and streams positions; the shell is built here. */
+  private showCpuGarment(g: GarmentGeometry) {
+    const shell = new ClothShell(g.rest, g.triangles, g.band, g.thickness);
+    shell.update(g.initial);
+    this.addGarment({ mesh: new THREE.Mesh(shell.geometry, this.fabric.material), cpu: shell, dispose: () => shell.dispose() });
+    this.onSimBackend?.("cpu");
   }
 
   private updateGarment(positions: Float32Array, progress: number) {
-    if (!this.garment) return;
-    const geo = this.garment.geometry;
-    const attr = geo.getAttribute("position") as THREE.BufferAttribute;
-    (attr.array as Float32Array).set(positions);
-    attr.needsUpdate = true;
-    geo.computeVertexNormals();
-    geo.computeBoundingSphere();
+    this.garment?.cpu?.update(positions);
     this.onSimProgress?.(progress);
+  }
+
+  /** GPU mode: simulation and shell run on the renderer's device, every frame. */
+  private startGpuGarment(g: GarmentGeometry, model: ClothModel, sdf: SdfGrid) {
+    const device = this.gpuDevice;
+    if (!device) return;
+    const solver = new GpuClothSolver(device, model, g.initial, sdf);
+    const shell = new GpuClothShell(this.renderer, g.rest, g.triangles, g.band, g.thickness, solver.positions);
+    const encoder = device.createCommandEncoder();
+    shell.encode(encoder);
+    device.queue.submit([encoder.finish()]);
+    const mesh = new THREE.Mesh(shell.geometry, this.fabric.material);
+    mesh.frustumCulled = false;
+    this.addGarment({
+      mesh,
+      gpu: { solver, shell, duration: model.params.duration, sewTime: model.params.sewTime, done: false, still: 0, lastMotion: -1 },
+      dispose: () => {
+        solver.dispose();
+        shell.dispose();
+      },
+    });
+    this.onSimBackend?.("gpu");
+  }
+
+  /** One rendered frame of GPU simulation: adaptive pacing and rest detection. */
+  private stepGpuGarment(gpu: NonNullable<Garment["gpu"]>, interval: number) {
+    if (interval > 0 && interval < 200) {
+      if (interval < FRAME_INTERVAL.raise) this.simFrames = Math.min(SIM_FRAMES.max, this.simFrames + 1);
+      else if (interval > FRAME_INTERVAL.lower) this.simFrames = Math.max(SIM_FRAMES.min, this.simFrames - 1);
+    }
+    const { solver, shell } = gpu;
+    solver.simulate(this.simFrames, 1 / 60, (encoder) => shell.encode(encoder));
+    solver.measureMotion();
+    const m = solver.motion;
+    if (m && m.time !== gpu.lastMotion) {
+      gpu.lastMotion = m.time;
+      const still = m.time > gpu.sewTime + 0.5 && m.mean < REST.mean && m.max < REST.max;
+      gpu.still = still ? gpu.still + 1 : 0;
+    }
+    gpu.done = gpu.still >= REST.count || solver.time >= gpu.duration;
+    this.onSimProgress?.(gpu.done ? 1 : Math.min(1, solver.time / gpu.duration));
   }
 
   private removeGarment() {
     if (!this.garment) return;
-    this.figure.remove(this.garment);
-    this.garment.geometry.dispose();
+    this.figure.remove(this.garment.mesh);
+    this.garment.dispose();
     this.garment = null;
   }
 
@@ -223,6 +302,10 @@ export class GarmentViewer {
   }
 
   private frame(time: number) {
+    const interval = time - this.lastFrameTime;
+    this.lastFrameTime = time;
+    const gpu = this.garment?.gpu;
+    if (gpu && !gpu.done) this.stepGpuGarment(gpu, interval);
     if (this.tween) {
       const { t0, from, to, targetFrom, targetTo } = this.tween;
       const k = Math.min(1, (time - t0) / 900);
@@ -288,6 +371,7 @@ export class GarmentViewer {
     this.resizeObserver.disconnect();
     this.controls.dispose();
     this.simulator.dispose();
+    this.removeGarment();
     this.fabric.dispose();
     this.scene.traverse((o) => {
       if (o instanceof THREE.Mesh) {

@@ -11,6 +11,7 @@ export function useViewer(container: RefObject<HTMLDivElement | null>) {
   const [status, setStatus] = useState<ViewerStatus>("loading");
   const [backend, setBackend] = useState("");
   const [simProgress, setSimProgress] = useState(0);
+  const [simBackend, setSimBackend] = useState<"gpu" | "cpu" | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -22,6 +23,7 @@ export function useViewer(container: RefObject<HTMLDivElement | null>) {
         viewer = v;
         viewerRef.current = v;
         v.onSimProgress = setSimProgress;
+        v.onSimBackend = setSimBackend;
         setBackend(v.backend);
         setStatus("ready");
       })
@@ -36,5 +38,5 @@ export function useViewer(container: RefObject<HTMLDivElement | null>) {
     };
   }, [container]);
 
-  return { viewerRef, status, backend, simProgress };
+  return { viewerRef, status, backend, simProgress, simBackend };
 }

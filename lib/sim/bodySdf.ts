@@ -4,11 +4,22 @@
  * point-to-plane distance to the closest vertex (vertex normal); deeper cells are
  * classified inside/outside by a flood fill from the grid border.
  */
-export class BodySdf {
-  private readonly data: Float32Array;
-  private readonly nx: number;
-  private readonly ny: number;
-  private readonly nz: number;
+/** Regular grid of signed distances (x fastest), as uploaded to the GPU. */
+export interface SdfGrid {
+  readonly data: Float32Array;
+  readonly nx: number;
+  readonly ny: number;
+  readonly nz: number;
+  readonly min: [number, number, number];
+  readonly h: number;
+}
+
+export class BodySdf implements SdfGrid {
+  /** Distances, x fastest. */
+  readonly data: Float32Array;
+  readonly nx: number;
+  readonly ny: number;
+  readonly nz: number;
 
   constructor(
     positions: Float32Array,

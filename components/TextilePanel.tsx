@@ -105,6 +105,8 @@ function TechSheet({ textile: t }: { textile: Textile }) {
     ["Armure", t.structure],
     ["Composition", t.composition],
     ["Grammage", `${t.weight} g/m²`],
+    ["Épaisseur", `${t.thickness.toLocaleString("fr-FR")} mm`],
+    ["Rigidité en flexion", `${(t.bending * 1e6).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} µN·m`],
     ["Élasticité", `${t.stretch.warp} % ${knit ? "colonne" : "chaîne"} · ${t.stretch.weft} % ${knit ? "rangée" : "trame"}`],
     ["Tombé", t.drape],
   ];

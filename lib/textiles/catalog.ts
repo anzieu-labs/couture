@@ -2,8 +2,9 @@
  * Textile library. Each entry carries:
  *  - optical parameters for the PBR material (roughness, sheen…),
  *  - the procedural pattern used to build its albedo/normal maps,
- *  - mechanical properties for the future XPBD cloth solver (indicative values,
- *    not calibrated yet — see research notes).
+ *  - mechanical properties driving the XPBD cloth solver: bending rigidity
+ *    (order of magnitude of Kawabata KES-F "B" measurements for the fabric
+ *    type), elongation per grain direction, thickness and friction.
  */
 
 export type Pattern =
@@ -39,8 +40,12 @@ export interface Textile {
   defaultColor: string;
   /** Second colour (weft, stripe, check…) when the pattern uses one. */
   secondary?: { label: string; default: string };
-  /** Future solver inputs (indicative). */
-  mechanics: { stretchCompliance: number; bendCompliance: number; density: number };
+  /** Bending rigidity B (N·m) — 1 gf·cm²/cm ≈ 9.8e-5 N·m. */
+  bending: number;
+  /** Thickness (mm). */
+  thickness: number;
+  /** Friction coefficient against the body. */
+  friction: number;
 }
 
 export const TEXTILES: Textile[] = [
@@ -60,7 +65,9 @@ export const TEXTILES: Textile[] = [
     sheenRoughness: 0.6,
     normalStrength: 0.9,
     defaultColor: "#1f2f4f",
-    mechanics: { stretchCompliance: 2e-6, bendCompliance: 4e-3, density: 0.16 },
+    bending: 5e-6,
+    thickness: 0.6,
+    friction: 0.45,
   },
   {
     id: "breton",
@@ -79,7 +86,9 @@ export const TEXTILES: Textile[] = [
     normalStrength: 0.8,
     defaultColor: "#1c2a4a",
     secondary: { label: "Fond", default: "#f3efe6" },
-    mechanics: { stretchCompliance: 1.5e-6, bendCompliance: 3e-3, density: 0.2 },
+    bending: 8e-6,
+    thickness: 0.7,
+    friction: 0.45,
   },
   {
     id: "pique",
@@ -97,7 +106,9 @@ export const TEXTILES: Textile[] = [
     sheenRoughness: 0.7,
     normalStrength: 1.2,
     defaultColor: "#f2efe8",
-    mechanics: { stretchCompliance: 1e-6, bendCompliance: 1.5e-3, density: 0.21 },
+    bending: 1.5e-5,
+    thickness: 1,
+    friction: 0.5,
   },
   {
     id: "rib",
@@ -115,7 +126,9 @@ export const TEXTILES: Textile[] = [
     sheenRoughness: 0.6,
     normalStrength: 1.4,
     defaultColor: "#8a9a7b",
-    mechanics: { stretchCompliance: 6e-6, bendCompliance: 3e-3, density: 0.23 },
+    bending: 1e-5,
+    thickness: 1.2,
+    friction: 0.5,
   },
   {
     id: "wool",
@@ -133,7 +146,9 @@ export const TEXTILES: Textile[] = [
     sheenRoughness: 0.8,
     normalStrength: 2,
     defaultColor: "#d0a23a",
-    mechanics: { stretchCompliance: 4e-6, bendCompliance: 8e-4, density: 0.42 },
+    bending: 5e-5,
+    thickness: 4,
+    friction: 0.6,
   },
   {
     id: "linen",
@@ -151,7 +166,9 @@ export const TEXTILES: Textile[] = [
     sheenRoughness: 0.7,
     normalStrength: 1,
     defaultColor: "#c9bba3",
-    mechanics: { stretchCompliance: 1e-7, bendCompliance: 2e-3, density: 0.185 },
+    bending: 2e-5,
+    thickness: 0.5,
+    friction: 0.4,
   },
   {
     id: "denim",
@@ -170,7 +187,9 @@ export const TEXTILES: Textile[] = [
     normalStrength: 1,
     defaultColor: "#2b4a7a",
     secondary: { label: "Trame", default: "#e7e2d6" },
-    mechanics: { stretchCompliance: 5e-8, bendCompliance: 4e-4, density: 0.34 },
+    bending: 1.2e-4,
+    thickness: 1,
+    friction: 0.4,
   },
   {
     id: "gingham",
@@ -189,7 +208,9 @@ export const TEXTILES: Textile[] = [
     normalStrength: 0.6,
     defaultColor: "#b5313a",
     secondary: { label: "Fond", default: "#f6f3ee" },
-    mechanics: { stretchCompliance: 1e-7, bendCompliance: 2.5e-3, density: 0.12 },
+    bending: 8e-6,
+    thickness: 0.3,
+    friction: 0.35,
   },
   {
     id: "satin",
@@ -207,7 +228,9 @@ export const TEXTILES: Textile[] = [
     sheenRoughness: 0.25,
     normalStrength: 0.25,
     defaultColor: "#6b1f2a",
-    mechanics: { stretchCompliance: 2e-7, bendCompliance: 1e-2, density: 0.09 },
+    bending: 2e-6,
+    thickness: 0.2,
+    friction: 0.15,
   },
   {
     id: "velvet",
@@ -225,7 +248,9 @@ export const TEXTILES: Textile[] = [
     sheenRoughness: 0.38,
     normalStrength: 0.35,
     defaultColor: "#3d2a5c",
-    mechanics: { stretchCompliance: 3e-7, bendCompliance: 3e-3, density: 0.28 },
+    bending: 2.5e-5,
+    thickness: 1.5,
+    friction: 0.6,
   },
 ];
 
