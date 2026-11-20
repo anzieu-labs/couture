@@ -1,8 +1,31 @@
+import { BONE_STRIDE } from "../../avatar/skeleton";
 import type { SdfGrid } from "../bodySdf";
+import type { PoseAt } from "../cloth";
 import { substepState, type ClothModel } from "../model";
-import { bendingWGSL, contactsWGSL, integrateWGSL, motionWGSL, resetWGSL, seamsWGSL, stretchWGSL, velocityWGSL, WORKGROUP } from "./shaders";
+import { SELF_CELLS_PER_AXIS } from "../selfCollision";
+import {
+  bendingWGSL,
+  contactsWGSL,
+  integrateWGSL,
+  motionWGSL,
+  resetWGSL,
+  seamsWGSL,
+  selfApplyWGSL,
+  selfClearWGSL,
+  selfCountEdgeWGSL,
+  selfCountTriWGSL,
+  selfEdgeEdgeWGSL,
+  selfFillEdgeWGSL,
+  selfFillTriWGSL,
+  selfScanWGSL,
+  selfVertexTriangleWGSL,
+  stretchWGSL,
+  velocityWGSL,
+  WORKGROUP,
+} from "./shaders";
 
 const UNIFORM_SLOT = 256; // minUniformBufferOffsetAlignment
+const SUBSTEP_SIZE = 32;
 
 /**
  * WebGPU implementation of the XPBD cloth solver (compute shaders, graph-
@@ -12,7 +35,13 @@ const UNIFORM_SLOT = 256; // minUniformBufferOffsetAlignment
  * the constraints of a colour run in parallel.
  *
  * Runs on the renderer's device: positions never leave the GPU (GpuClothShell
- * turns them into the rendered vertex buffers).
+ * turns them into the rendered vertex buffers). An animated body is collided
+ * with in rest space (lib/sim/posedBody.ts): the bone transforms of every
+ * substep are uploaded with each frame. Self-collisions (lib/sim/selfCollision.ts)
+ * run every `self.interval` substeps: for triangles then edges, hash (count,
+ * prefix sum, fill); vertex ↔ triangle, edge ↔ edge; apply. Tangled regions
+ * (lib/sim/untangle.ts) are analysed on the CPU from read-back positions
+ * (readPositions) and uploaded with setTangles.
  */
 export class GpuClothSolver {
   time = 0;
@@ -25,11 +54,17 @@ export class GpuClothSolver {
   private readonly encodeFrame: (encoder: GPUCommandEncoder) => void;
   private readonly encodeMotion: (encoder: GPUCommandEncoder) => void;
   private readonly motionReadback: GPUBuffer;
+  private readonly tangle: GPUBuffer | null = null;
+  private readonly positionsReadback: GPUBuffer;
+  private positionsPending = false;
+  private readonly bones: GPUBuffer;
+  private readonly boneCount: number;
+  private readonly boneScratch: Float32Array;
   private motionPending = false;
   /** Latest measured motion: mean and max vertex speed (m/s), and the simulated time it was taken at. */
   motion: { mean: number; max: number; time: number } | null = null;
 
-  constructor(private readonly device: GPUDevice, private readonly m: ClothModel, initial: Float32Array, sdf: SdfGrid) {
+  constructor(private readonly device: GPUDevice, private readonly m: ClothModel, initial: Float32Array, sdf: SdfGrid, boneCount = 0) {
     const p = m.params;
     const n = m.vertexCount;
     const S = GPUBufferUsage.STORAGE, D = GPUBufferUsage.COPY_DST;
@@ -47,7 +82,7 @@ export class GpuClothSolver {
     };
 
     // --- Buffers ---------------------------------------------------------------
-    this.positions = storage(initial);
+    this.positions = storage(initial, GPUBufferUsage.COPY_SRC); // read back for the intersection analyses
     const prev = storage(initial);
     const vel = storage(new Float32Array(3 * n));
     const invMass = storage(m.invMass);
@@ -58,6 +93,12 @@ export class GpuClothSolver {
     const seams = storage(m.seams), seamStart = storage(m.seamStart);
     const onSeam = storage(m.onSeam);
     const sdfData = storage(sdf.data);
+    const restPos = storage(initial);
+    const skin = storage(sdf.skin ?? new Uint32Array(4));
+    // Animated body: posing needs the skin grid.
+    this.boneCount = sdf.skin ? boneCount : 0;
+    this.boneScratch = new Float32Array(Math.max(4, this.boneCount * BONE_STRIDE * p.substeps));
+    this.bones = storage(this.boneScratch);
 
     this.frameUniform = uniform(16);
     this.substepUniform = uniform(UNIFORM_SLOT * p.substeps);
@@ -73,7 +114,7 @@ export class GpuClothSolver {
     colorRanges.forEach(([start, count], i) => rangeData.set([start, count], (UNIFORM_SLOT / 4) * i));
     device.queue.writeBuffer(ranges, 0, rangeData);
     const rangeSlot = (i: number): GPUBufferBinding => ({ buffer: ranges, offset: UNIFORM_SLOT * i, size: 16 });
-    const substepSlot = (s: number): GPUBufferBinding => ({ buffer: this.substepUniform, offset: UNIFORM_SLOT * s, size: 16 });
+    const substepSlot = (s: number): GPUBufferBinding => ({ buffer: this.substepUniform, offset: UNIFORM_SLOT * s, size: SUBSTEP_SIZE });
     const frame: GPUBufferBinding = { buffer: this.frameUniform };
 
     // --- Pipelines & bind groups ------------------------------------------------
@@ -98,6 +139,85 @@ export class GpuClothSolver {
     const contacts = pipeline(contactsWGSL);
     const velocity = pipeline(velocityWGSL);
 
+    // Self-collisions.
+    const self = m.self;
+    const triCount = m.triangles.length / 3;
+    let selfGroups: ((s: number) => { pipe: GPUComputePipeline; g0: GPUBindGroup; g1: GPUBindGroup; count: number }[]) | null = null;
+    if (self) {
+      const edgeCount = self.edges.length / 2;
+      const pipes = {
+        clear: pipeline(selfClearWGSL),
+        scan: pipeline(selfScanWGSL),
+        countTri: pipeline(selfCountTriWGSL),
+        fillTri: pipeline(selfFillTriWGSL),
+        countEdge: pipeline(selfCountEdgeWGSL),
+        fillEdge: pipeline(selfFillEdgeWGSL),
+        vt: pipeline(selfVertexTriangleWGSL),
+        ee: pipeline(selfEdgeEdgeWGSL),
+        apply: pipeline(selfApplyWGSL),
+      };
+      const tris = storage(m.triangles), canon = storage(self.canon);
+      // Edges with their seam-merged ids: a, b, canon a, canon b.
+      const edgeData = new Uint32Array(2 * self.edges.length);
+      for (let e = 0; e < edgeCount; e++) {
+        const a = self.edges[2 * e], b = self.edges[2 * e + 1];
+        edgeData.set([a, b, self.canon[a], self.canon[b]], 4 * e);
+      }
+      const edges = storage(edgeData);
+      const triTable = storage(new Uint32Array(2 * self.buckets)), edgeTable = storage(new Uint32Array(2 * self.buckets));
+      const triEntries = storage(new Uint32Array(triCount * SELF_CELLS_PER_AXIS ** 3));
+      const edgeEntries = storage(new Uint32Array(edgeCount * SELF_CELLS_PER_AXIS ** 3));
+      const snapshot = storage(initial);
+      const vtOut = storage(new Float32Array(4 * n)), eeOut = storage(new Float32Array(8 * edgeCount));
+      const vertexEdgeStart = storage(self.vertexEdgeStart), vertexEdges = storage(self.vertexEdges);
+      const tangle = (this.tangle = storage(new Float32Array(4 * n)));
+      const params = uniform(32);
+      const pd = new ArrayBuffer(32);
+      new Float32Array(pd, 0, 5).set([self.triCell, self.edgeCell, self.distance, self.reach, self.edgeGrow]);
+      new Uint32Array(pd, 20, 1)[0] = self.buckets - 1;
+      device.queue.writeBuffer(params, 0, pd);
+      const g0 = {
+        clearTri: group(pipes.clear, 0, [triTable]),
+        scanTri: group(pipes.scan, 0, [triTable]),
+        countTri: group(pipes.countTri, 0, [this.positions, tris, triTable, triEntries]),
+        fillTri: group(pipes.fillTri, 0, [this.positions, tris, triTable, triEntries]),
+        clearEdge: group(pipes.clear, 0, [edgeTable]),
+        scanEdge: group(pipes.scan, 0, [edgeTable]),
+        countEdge: group(pipes.countEdge, 0, [this.positions, edges, edgeTable, edgeEntries, vtOut]),
+        fillEdge: group(pipes.fillEdge, 0, [this.positions, edges, edgeTable, edgeEntries, vtOut]),
+        vt: group(pipes.vt, 0, [this.positions, snapshot, tris, canon, triTable, triEntries, vtOut, tangle]),
+        ee: group(pipes.ee, 0, [this.positions, snapshot, edges, edgeTable, edgeEntries, eeOut, tangle, vtOut]),
+        apply: group(pipes.apply, 0, [this.positions, snapshot, vtOut, eeOut, vertexEdgeStart, vertexEdges, invMass]),
+      };
+      const g1 = Array.from({ length: p.substeps }, (_, s) => ({
+        sub: group(pipes.clear, 1, [substepSlot(s)]),
+        scan: group(pipes.scan, 1, [substepSlot(s)]),
+        countTri: group(pipes.countTri, 1, [substepSlot(s), params]),
+        fillTri: group(pipes.fillTri, 1, [substepSlot(s), params]),
+        countEdge: group(pipes.countEdge, 1, [substepSlot(s), params]),
+        fillEdge: group(pipes.fillEdge, 1, [substepSlot(s), params]),
+        vt: group(pipes.vt, 1, [substepSlot(s), params]),
+        ee: group(pipes.ee, 1, [substepSlot(s), params]),
+        apply: group(pipes.apply, 1, [substepSlot(s)]),
+      }));
+      selfGroups = (s) => [
+        { pipe: pipes.clear, g0: g0.clearTri, g1: g1[s].sub, count: 2 * self.buckets },
+        { pipe: pipes.countTri, g0: g0.countTri, g1: g1[s].countTri, count: triCount },
+        { pipe: pipes.scan, g0: g0.scanTri, g1: g1[s].scan, count: 1 },
+        { pipe: pipes.fillTri, g0: g0.fillTri, g1: g1[s].fillTri, count: triCount },
+        { pipe: pipes.vt, g0: g0.vt, g1: g1[s].vt, count: n },
+        // Edges near another layer only (marked by the vertex ↔ triangle pass).
+        { pipe: pipes.clear, g0: g0.clearEdge, g1: g1[s].sub, count: 2 * self.buckets },
+        { pipe: pipes.countEdge, g0: g0.countEdge, g1: g1[s].countEdge, count: edgeCount },
+        { pipe: pipes.scan, g0: g0.scanEdge, g1: g1[s].scan, count: 1 },
+        { pipe: pipes.fillEdge, g0: g0.fillEdge, g1: g1[s].fillEdge, count: edgeCount },
+        { pipe: pipes.ee, g0: g0.ee, g1: g1[s].ee, count: edgeCount },
+        { pipe: pipes.apply, g0: g0.apply, g1: g1[s].apply, count: n },
+      ];
+    }
+    this.positionsReadback = device.createBuffer({ size: 12 * n, usage: GPUBufferUsage.MAP_READ | D });
+    this.buffers.push(this.positionsReadback);
+
     const substeps = Array.from({ length: p.substeps }, (_, s) => s);
     const bg = {
       integrate0: group(integrate, 0, [this.positions, prev, vel, invMass]),
@@ -111,7 +231,7 @@ export class GpuClothSolver {
       sew1: substeps.map((s) =>
         m.seamColors.map((_, c) => group(sew, 1, [substepSlot(s), rangeSlot(m.edgeColors.length + m.bendColors.length + c)])),
       ),
-      contacts0: group(contacts, 0, [this.positions, prev, onSeam, sdfData]),
+      contacts0: group(contacts, 0, [this.positions, onSeam, sdfData, restPos, skin, this.bones]),
       contacts1: substeps.map((s) => group(contacts, 1, [frame, substepSlot(s), grid])),
       velocity0: group(velocity, 0, [this.positions, prev, vel]),
       velocity1: group(velocity, 1, [frame]),
@@ -158,6 +278,11 @@ export class GpuClothSolver {
           for (const c of sweeps.bend[sweep]) run(bending, bg.bending0, bg.bending1[c], m.bendColors[c][1]);
           for (const c of sweeps.seams[sweep]) run(sew, bg.sew0, bg.sew1[s][c], m.seamColors[c][1]);
         }
+        if (selfGroups && self && (s + 1) % self.interval === 0)
+          for (const k of selfGroups(s)) {
+            current = null; // the same pipeline runs on the triangle and the edge tables
+            run(k.pipe, k.g0, k.g1, k.count);
+          }
         run(contacts, bg.contacts0, bg.contacts1[s], n);
         run(velocity, bg.velocity0, bg.velocity1, 3 * n);
       }
@@ -167,21 +292,29 @@ export class GpuClothSolver {
 
   /**
    * Queues `frames` frames of `dt` seconds. `after` may append commands to the
-   * last frame (e.g. building the rendered shell from `positions`).
+   * last frame (e.g. building the rendered shell from `positions`). `poseAt`
+   * animates the body; its time is relative to this call.
    */
-  simulate(frames: number, dt: number, after?: (encoder: GPUCommandEncoder) => void) {
+  simulate(frames: number, dt: number, after?: (encoder: GPUCommandEncoder) => void, poseAt?: PoseAt) {
     const p = this.m.params;
     const h = dt / p.substeps;
     const offset = p.skinGap + p.thickness / 2;
     this.device.queue.writeBuffer(this.frameUniform, 0, new Float32Array([h, Math.exp(-p.damping * h), p.friction, offset]));
     const slot = new ArrayBuffer(UNIFORM_SLOT * p.substeps);
+    const stride = this.boneCount * BONE_STRIDE;
     for (let f = 0; f < frames; f++) {
+      let anyPosed = false;
       for (let s = 0; s < p.substeps; s++) {
         const st = substepState(p, this.time + s * h);
+        // Same convention as the CPU solver: the pose at the end of the substep.
+        const posed =
+          !!poseAt && stride > 0 && poseAt(f * dt + (s + 1) * h, this.boneScratch.subarray(s * stride, (s + 1) * stride));
+        anyPosed ||= posed;
         new Float32Array(slot, UNIFORM_SLOT * s, 2).set([st.gravity, st.sewK]);
-        new Uint32Array(slot, UNIFORM_SLOT * s + 8, 1)[0] = st.sewing ? 1 : 0;
+        new Uint32Array(slot, UNIFORM_SLOT * s + 8, 4).set([st.sewing ? 1 : 0, posed ? 1 : 0, (s * stride) / 4, st.selfActive ? 1 : 0]);
       }
       this.device.queue.writeBuffer(this.substepUniform, 0, slot);
+      if (anyPosed) this.device.queue.writeBuffer(this.bones, 0, this.boneScratch as Float32Array<ArrayBuffer>);
       const encoder = this.device.createCommandEncoder();
       this.encodeFrame(encoder);
       if (f === frames - 1) after?.(encoder);
@@ -210,6 +343,28 @@ export class GpuClothSolver {
       })
       .catch(() => {}) // device lost / destroyed buffer
       .finally(() => (this.motionPending = false));
+  }
+
+  /** Copy of the current positions (asynchronous read-back); null while one is in flight. */
+  readPositions(): Promise<Float32Array> | null {
+    if (this.positionsPending) return null;
+    this.positionsPending = true;
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(this.positions, 0, this.positionsReadback, 0, this.positionsReadback.size);
+    this.device.queue.submit([encoder.finish()]);
+    return this.positionsReadback
+      .mapAsync(GPUMapMode.READ)
+      .then(() => {
+        const out = new Float32Array(this.positionsReadback.getMappedRange().slice(0));
+        this.positionsReadback.unmap();
+        return out;
+      })
+      .finally(() => (this.positionsPending = false));
+  }
+
+  /** Tangled regions (untangle.ts output) for the self-collision passes. */
+  setTangles(tangle: Float32Array) {
+    if (this.tangle) this.device.queue.writeBuffer(this.tangle, 0, tangle as Float32Array<ArrayBuffer>);
   }
 
   dispose() {

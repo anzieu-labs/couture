@@ -23,7 +23,12 @@ N'installez pas l'extra `anny[smpl]` : les topologies SMPL/SMPL-X sont non comme
 - **18 ajustements locaux** (carrure, tours de poitrine / taille / hanches, longueurs…),
   en version + et −.
 - Le JSON contient la formule curseurs → poids (portée en TypeScript dans
-  `lib/avatar/anny.ts`) et 27 articulations clés pour chaque déformation.
+  `lib/avatar/anny.ts`) et 27 articulations clés pour chaque déformation, avec leur
+  hiérarchie (`bones.parents`).
+- **Skinning** : les 104 os d'Anny sont réduits à ces 27 articulations (les poids des
+  doigts, orteils, os de torsion et yeux vont à leur ancêtre retenu) ; 4 influences par
+  sommet, attributs `JOINTS_0` / `WEIGHTS_0` du GLB (octets, poids sommant à 255).
+  Utilisé par l'animation (`lib/avatar/skeleton.ts`).
 
 Les déformations sont quantifiées en int16 (`KHR_mesh_quantization`) ; la magnitude réelle
 de chaque cible est `scale` dans le JSON.

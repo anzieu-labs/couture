@@ -37,6 +37,12 @@ export async function loadAnnyModel(): Promise<AnnyModel> {
     }
     return out;
   });
+  const skinAttr = (name: string) => {
+    const a = geo.getAttribute(name) as BufferAttribute | undefined;
+    if (!a || !(a.array instanceof Uint8Array) || a.itemSize !== 4) throw new Error(`mannequin.glb: missing ${name} (re-run the export)`);
+    return Uint8Array.from(a.array);
+  };
+  const skin = { index: skinAttr("skinIndex"), weight: skinAttr("skinWeight") };
   geo.dispose();
-  return new AnnyModel(meta, base, indices, deltas);
+  return new AnnyModel(meta, base, indices, deltas, skin);
 }

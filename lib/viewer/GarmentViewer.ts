@@ -5,10 +5,13 @@ import type { AnnyModel, BodyShape, LocalChanges, Phenotype } from "../avatar/an
 import { measureForPattern, type TorsoFrame } from "../avatar/bodyMeasures";
 import { loadAnnyModel } from "../avatar/loadAnny";
 import { measureBody, type BodyMeasurement } from "../avatar/measure";
+import { Animator, CADENCE, MOTION_DELAY, SETTLE_TIME } from "../avatar/motion";
+import { BONE_STRIDE, Skeleton, skinVertices } from "../avatar/skeleton";
 import { GarmentSimulator } from "../garment/GarmentSimulator";
 import { MeshSlicer } from "../geometry/slice";
 import type { BodyMeasures, Pattern } from "../pattern/tshirt";
-import type { ClothParams } from "../sim/model";
+import { SELF_DELAY, type ClothParams } from "../sim/model";
+import { UNTANGLE_INTERVAL } from "../sim/selfCollision";
 import type { Textile } from "../textiles/catalog";
 import type { TextileColors } from "../textiles/generate";
 import { GpuClothSolver } from "../sim/gpu/GpuClothSolver";
@@ -41,13 +44,28 @@ const FRAME_INTERVAL = { raise: 19, lower: 24 }; // ms
  * are sparse (asynchronous read-back behind queued GPU work), so one suffices.
  */
 const REST = { mean: 0.003, max: 0.03, count: 1 };
+/** Real-time pacing while the body moves: simulated time the solver may lag behind (s). */
+const MAX_LAG = 0.1;
+const SIM_DT = 1 / 60;
 
 interface Garment {
   mesh: THREE.Mesh;
   /** CPU mode: shell rebuilt from streamed positions. */
   cpu?: ClothShell;
   /** GPU mode: simulated and rebuilt on the GPU every frame. */
-  gpu?: { solver: GpuClothSolver; shell: GpuClothShell; duration: number; sewTime: number; done: boolean; still: number; lastMotion: number };
+  gpu?: {
+    solver: GpuClothSolver;
+    shell: GpuClothShell;
+    duration: number;
+    sewTime: number;
+    done: boolean;
+    still: number;
+    lastMotion: number;
+    /** Simulated time the body last moved at. */
+    movedAt: number;
+    /** Simulated time of the last intersection analysis request. */
+    untangledAt: number;
+  };
   /** Switches the fit-map quantity and refreshes the colours. */
   setFitMode: (mode: FitMode) => void;
   dispose: () => void;
@@ -67,6 +85,12 @@ interface Tween {
  * sewn from its flat pattern and draped by an XPBD cloth solver — on the
  * renderer's GPU with WebGPU (simulation + thick shell, no read-back), else on
  * the CPU in a worker.
+ *
+ * The mannequin can walk in place or turn (Animator, skinned on the CPU). The
+ * animation clock follows the simulated time while a GPU garment is simulated
+ * (real time while the body moves, fast forward otherwise), the wall clock
+ * otherwise; in CPU mode the worker owns the timeline and sends the pose with
+ * each frame.
  */
 export class GarmentViewer {
   readonly backend: "WebGPU" | "WebGL 2";
@@ -89,6 +113,21 @@ export class GarmentViewer {
   private fitMode: FitMode | null = null;
   private readonly fitMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 });
   private shape: BodyShape | null = null;
+  /** Rest pose of the current morphology (the geometry holds the posed body). */
+  private restPositions: Float32Array;
+  private restNormals: Float32Array;
+  private skeleton!: Skeleton;
+  private animator!: Animator;
+  /** Animation clock (s). */
+  private clock = 0;
+  private lag = 0;
+  private walkWanted = false;
+  private cadence = CADENCE.default;
+  private armSpread: number | null = null;
+  private posed = false;
+  private readonly bones: Float32Array;
+  /** CPU mode: pose of the latest simulated frame. */
+  private cpuBones: Float32Array | null = null;
   private slicer: MeshSlicer | null = null;
   private tween: Tween | null = null;
   private lastFrameTime = 0;
@@ -130,14 +169,19 @@ export class GarmentViewer {
 
     this.setupStudio();
 
-    // Mannequin: positions are rewritten on every morphology change.
+    // Mannequin: positions are rewritten on every morphology change and every posed frame.
+    this.restPositions = Float32Array.from(anny.base);
+    this.restNormals = new Float32Array(anny.base.length);
+    this.bones = new Float32Array(anny.meta.bones.labels.length * BONE_STRIDE);
     this.bodyGeo.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(anny.base), 3));
+    this.bodyGeo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(anny.base.length), 3));
     this.bodyGeo.setIndex(new THREE.BufferAttribute(anny.indices, 1));
     this.body = new THREE.Mesh(
       this.bodyGeo,
       new THREE.MeshPhysicalMaterial({ color: "#efe9e0", roughness: 0.55, clearcoat: 0.1, clearcoatRoughness: 0.6 }),
     );
     this.body.castShadow = this.body.receiveShadow = true;
+    this.body.frustumCulled = false; // posed on the CPU, bounds of the rest pose
     this.figure.add(this.body);
     this.scene.add(this.figure);
     this.setBody(anny.defaults());
@@ -146,7 +190,8 @@ export class GarmentViewer {
     this.simulator = new GarmentSimulator({
       onMesh: (m) => this.showCpuGarment(m),
       onModel: (m) => this.startGpuGarment(m, m.model, m.sdf),
-      onFrame: (positions, progress) => this.updateGarment(positions, progress),
+      onFrame: (positions, progress, bones) => this.updateGarment(positions, progress, bones),
+      onTangles: (tangle) => this.garment?.gpu?.solver.setTangles(tangle),
     });
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -164,15 +209,85 @@ export class GarmentViewer {
   /** Recomputes the mannequin for a morphology and stands it on the plinth. */
   setBody(phenotype: Phenotype, localChanges: LocalChanges = {}) {
     const attr = this.bodyGeo.getAttribute("position") as THREE.BufferAttribute;
-    const shape = this.anny.compute(phenotype, localChanges, attr.array as Float32Array);
+    const normals = this.bodyGeo.getAttribute("normal") as THREE.BufferAttribute;
+    const shape = this.anny.compute(phenotype, localChanges, this.restPositions);
     let minY = Infinity;
     for (let i = 1; i < shape.positions.length; i += 3) minY = Math.min(minY, shape.positions[i]);
     this.figure.position.y = PLINTH_H - minY;
+    (attr.array as Float32Array).set(shape.positions);
     attr.needsUpdate = true;
     this.bodyGeo.computeVertexNormals();
+    this.restNormals.set(normals.array as Float32Array);
     this.bodyGeo.computeBoundingSphere();
     this.shape = shape;
     this.slicer = null;
+
+    const { labels, parents } = this.anny.meta.bones;
+    this.skeleton = new Skeleton(labels, parents, shape.joints, shape.positions, this.anny.skin);
+    if (this.animator) {
+      this.animator.skeleton = this.skeleton;
+      this.animator.restoreArmSpread(this.clock);
+    } else this.animator = new Animator(this.skeleton);
+    this.posed = false;
+  }
+
+  /** Poses the rendered body (null: rest pose). */
+  private poseBody(bones: Float32Array | null) {
+    if (!bones && !this.posed) return;
+    const attr = this.bodyGeo.getAttribute("position") as THREE.BufferAttribute;
+    const normals = this.bodyGeo.getAttribute("normal") as THREE.BufferAttribute;
+    if (bones) {
+      skinVertices(this.restPositions, this.restNormals, this.anny.skin, bones, attr.array as Float32Array, normals.array as Float32Array);
+    } else {
+      (attr.array as Float32Array).set(this.restPositions);
+      (normals.array as Float32Array).set(this.restNormals);
+    }
+    attr.needsUpdate = normals.needsUpdate = true;
+    this.posed = !!bones;
+  }
+
+  // --- Motion -----------------------------------------------------------------
+
+  /** Walks in place (looped) or stops; with a garment, starts once it is sewn. */
+  setWalking(on: boolean) {
+    this.walkWanted = on;
+    this.animator.setWalking(on, this.clock);
+    if (this.garment?.cpu) this.simulator.motion({ walk: on });
+  }
+
+  /** Walking cadence (steps per minute). */
+  setCadence(stepsPerMinute: number) {
+    this.cadence = stepsPerMinute;
+    this.animator.setCadence(stepsPerMinute, this.clock);
+    if (this.garment?.cpu) this.simulator.motion({ cadence: stepsPerMinute });
+  }
+
+  /** Arm spread in degrees from the body (null: rest pose); with a garment, applied once it is sewn. */
+  setArmSpread(degrees: number | null) {
+    this.armSpread = degrees;
+    this.animator.setArmSpread(degrees, this.clock);
+    if (this.garment?.cpu) this.simulator.motion({ arms: degrees });
+  }
+
+  /** Arm spread of the current morphology's rest pose (degrees from the body). */
+  get restArmSpread(): number {
+    return this.animator.restArmSpread;
+  }
+
+  /** One full turn on the plinth (stops walking first). */
+  turn() {
+    this.walkWanted = false;
+    this.animator.startTurn(this.clock);
+    if (this.garment?.cpu) this.simulator.motion({ turn: true });
+  }
+
+  /** Starts a new garment's timeline: rest pose while it is sewn, then the requested walk. */
+  private restartMotion(sewTime: number) {
+    this.animator.reset();
+    this.animator.holdUntil(this.clock + sewTime + MOTION_DELAY);
+    this.animator.restoreArmSpread(this.clock);
+    if (this.walkWanted) this.animator.setWalking(true, this.clock);
+    this.cpuBones = null;
   }
 
   /** Current body shape with its (lazily built, shared) cross-section index. */
@@ -199,6 +314,9 @@ export class GarmentViewer {
   /** Sews and drapes a pattern on the current mannequin (in a worker). */
   dress(pattern: Pattern, torso: TorsoFrame, cloth: Partial<ClothParams> = {}) {
     if (!this.shape) return;
+    // The new garment is placed on the rest pose: ease back to it meanwhile.
+    this.animator.fadeToRest(this.clock);
+    const { labels, parents } = this.anny.meta.bones;
     this.simulator.dress({
       mode: this.gpuDevice ? "gpu" : "cpu",
       pattern,
@@ -206,9 +324,12 @@ export class GarmentViewer {
       cloth,
       body: {
         positions: Float32Array.from(this.shape.positions),
-        normals: Float32Array.from(this.bodyGeo.getAttribute("normal").array as Float32Array),
+        normals: Float32Array.from(this.restNormals),
         joints: this.shape.joints,
+        skin: this.anny.skin,
+        rig: { labels, parents },
       },
+      motion: { walking: this.walkWanted, cadence: this.cadence, arms: this.armSpread },
     });
     this.onSimProgress?.(0);
   }
@@ -244,6 +365,8 @@ export class GarmentViewer {
   private showCpuGarment(g: GarmentGeometry) {
     const shell = new ClothShell(g.rest, g.triangles, g.band, g.thickness, g.tensile);
     shell.update(g.initial);
+    this.animator.reset(); // the worker owns the timeline now
+    this.cpuBones = null;
     this.addGarment({
       mesh: new THREE.Mesh(shell.geometry, this.fabric.material),
       cpu: shell,
@@ -253,8 +376,10 @@ export class GarmentViewer {
     this.onSimBackend?.("cpu");
   }
 
-  private updateGarment(positions: Float32Array, progress: number) {
-    this.garment?.cpu?.update(positions);
+  private updateGarment(positions: Float32Array, progress: number, bones: Float32Array | null) {
+    if (!this.garment?.cpu) return;
+    this.garment.cpu.update(positions);
+    this.cpuBones = bones;
     this.onSimProgress?.(progress);
   }
 
@@ -262,7 +387,8 @@ export class GarmentViewer {
   private startGpuGarment(g: GarmentGeometry, model: ClothModel, sdf: SdfGrid) {
     const device = this.gpuDevice;
     if (!device) return;
-    const solver = new GpuClothSolver(device, model, g.initial, sdf);
+    const solver = new GpuClothSolver(device, model, g.initial, sdf, this.skeleton.count);
+    this.restartMotion(model.params.sewTime);
     const shell = new GpuClothShell(this.renderer, g.rest, g.triangles, g.band, g.thickness, g.tensile, solver.positions);
     const rebuildShell = () => {
       const encoder = device.createCommandEncoder();
@@ -274,7 +400,17 @@ export class GarmentViewer {
     mesh.frustumCulled = false;
     this.addGarment({
       mesh,
-      gpu: { solver, shell, duration: model.params.duration, sewTime: model.params.sewTime, done: false, still: 0, lastMotion: -1 },
+      gpu: {
+        solver,
+        shell,
+        duration: model.params.duration,
+        sewTime: model.params.sewTime,
+        done: false,
+        still: 0,
+        lastMotion: -1,
+        movedAt: -Infinity,
+        untangledAt: -Infinity,
+      },
       setFitMode: (mode) => {
         shell.setFitMode(mode);
         rebuildShell(); // the simulation may be over: refresh the colours now
@@ -287,22 +423,52 @@ export class GarmentViewer {
     this.onSimBackend?.("gpu");
   }
 
-  /** One rendered frame of GPU simulation: adaptive pacing and rest detection. */
+  /**
+   * One rendered frame of GPU simulation: real-time pacing while the body
+   * moves, else adaptive fast forward; rest detection. Advances the clock.
+   */
   private stepGpuGarment(gpu: NonNullable<Garment["gpu"]>, interval: number) {
-    if (interval > 0 && interval < 200) {
-      if (interval < FRAME_INTERVAL.raise) this.simFrames = Math.min(SIM_FRAMES.max, this.simFrames + 1);
-      else if (interval > FRAME_INTERVAL.lower) this.simFrames = Math.max(SIM_FRAMES.min, this.simFrames - 1);
-    }
     const { solver, shell } = gpu;
-    solver.simulate(this.simFrames, 1 / 60, (encoder) => shell.encode(encoder));
+    let frames: number;
+    if (this.animator.moving(this.clock)) {
+      this.lag = Math.min(MAX_LAG, this.lag + Math.max(0, interval) / 1000);
+      frames = Math.floor(this.lag / SIM_DT);
+      this.lag -= frames * SIM_DT;
+    } else {
+      this.lag = 0;
+      if (interval > 0 && interval < 200) {
+        if (interval < FRAME_INTERVAL.raise) this.simFrames = Math.min(SIM_FRAMES.max, this.simFrames + 1);
+        else if (interval > FRAME_INTERVAL.lower) this.simFrames = Math.max(SIM_FRAMES.min, this.simFrames - 1);
+      }
+      frames = this.simFrames;
+    }
+    if (frames > 0) {
+      const t0 = this.clock;
+      solver.simulate(frames, SIM_DT, (encoder) => shell.encode(encoder), (t, out) => this.animator.sample(t0 + t, out));
+      this.clock += frames * SIM_DT;
+    }
+    if (this.animator.moving(this.clock)) {
+      gpu.movedAt = solver.time;
+      gpu.still = 0;
+    }
+    // Tangled regions: analysed in the worker from read-back positions.
+    if (solver.time > gpu.sewTime + SELF_DELAY && solver.time - gpu.untangledAt >= UNTANGLE_INTERVAL) {
+      const read = solver.readPositions();
+      if (read) {
+        gpu.untangledAt = solver.time;
+        read.then((p) => this.garment?.gpu === gpu && this.simulator.untangle(p)).catch(() => {});
+      }
+    }
     solver.measureMotion();
     const m = solver.motion;
     if (m && m.time !== gpu.lastMotion) {
       gpu.lastMotion = m.time;
-      const still = m.time > gpu.sewTime + 0.5 && m.mean < REST.mean && m.max < REST.max;
+      const still = m.time > gpu.sewTime + 0.5 && m.time > gpu.movedAt + 0.5 && m.mean < REST.mean && m.max < REST.max;
       gpu.still = still ? gpu.still + 1 : 0;
     }
-    gpu.done = gpu.still >= REST.count || solver.time >= gpu.duration;
+    gpu.done =
+      !this.animator.pending(this.clock) &&
+      (gpu.still >= REST.count || solver.time >= Math.max(gpu.duration, gpu.movedAt + SETTLE_TIME));
     this.onSimProgress?.(gpu.done ? 1 : Math.min(1, solver.time / gpu.duration));
   }
 
@@ -332,8 +498,12 @@ export class GarmentViewer {
   private frame(time: number) {
     const interval = time - this.lastFrameTime;
     this.lastFrameTime = time;
-    const gpu = this.garment?.gpu;
-    if (gpu && !gpu.done) this.stepGpuGarment(gpu, interval);
+    const garment = this.garment;
+    const gpu = garment?.gpu;
+    if (gpu && (!gpu.done || this.animator.pending(this.clock))) this.stepGpuGarment(gpu, interval);
+    else if (interval > 0) this.clock += Math.min(interval, 100) / 1000;
+    if (garment?.cpu) this.poseBody(this.cpuBones);
+    else this.poseBody(this.animator.sample(this.clock, this.bones) ? this.bones : null);
     if (this.tween) {
       const { t0, from, to, targetFrom, targetTo } = this.tween;
       const k = Math.min(1, (time - t0) / 900);

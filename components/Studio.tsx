@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FEMALE, MALE } from "@/lib/avatar/morphology";
+import { CADENCE } from "@/lib/avatar/motion";
 import { TEXTILES, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
 import type { FitMode } from "@/lib/viewer/fitMap";
@@ -12,12 +13,14 @@ import { useMorphology } from "./hooks/useMorphology";
 import { useViewer } from "./hooks/useViewer";
 import { MorphologyPanel } from "./MorphologyPanel";
 import { PatternPanel } from "./PatternPanel";
+import { PosePanel } from "./PosePanel";
 import { TextilePanel } from "./TextilePanel";
 
-type Tab = "morpho" | "patron" | "tissu";
+type Tab = "morpho" | "pose" | "patron" | "tissu";
 
 const TABS: [Tab, string][] = [
   ["morpho", "Morphologie"],
+  ["pose", "Pose"],
   ["patron", "Patron"],
   ["tissu", "Tissu"],
 ];
@@ -47,6 +50,9 @@ export default function Studio() {
   const [tab, setTab] = useState<Tab>("morpho");
   const [view, setView] = useState<ViewPreset>("face");
   const [autoRotate, setAutoRotate] = useState(false);
+  const [walking, setWalking] = useState(false);
+  const [cadence, setCadence] = useState(CADENCE.default);
+  const [armSpread, setArmSpread] = useState<number | null>(null);
   const [fitMode, setFitMode] = useState<FitMode | null>(null);
 
   // Fabric
@@ -72,6 +78,23 @@ export default function Studio() {
   useEffect(() => {
     if (ready) viewerRef.current?.setFitMap(fitMode);
   }, [ready, fitMode, viewerRef]);
+
+  useEffect(() => {
+    if (ready) viewerRef.current?.setWalking(walking);
+  }, [ready, walking, viewerRef]);
+
+  useEffect(() => {
+    if (ready) viewerRef.current?.setCadence(cadence);
+  }, [ready, cadence, viewerRef]);
+
+  useEffect(() => {
+    if (ready) viewerRef.current?.setArmSpread(armSpread);
+  }, [ready, armSpread, viewerRef]);
+
+  const turn = () => {
+    setWalking(false);
+    viewerRef.current?.turn();
+  };
 
   const goTo = (v: ViewPreset) => {
     setView(v);
@@ -139,7 +162,28 @@ export default function Studio() {
           </div>
         )}
 
-        <div className="absolute inset-x-0 bottom-4 flex justify-center px-4 md:bottom-6">
+        <div className="absolute inset-x-0 bottom-4 flex flex-col items-center gap-2 px-4 md:bottom-6">
+          {ready && (
+            <div className="flex items-center gap-1 rounded-full border border-line bg-white/80 p-1 shadow-sm backdrop-blur" role="group" aria-label="Mouvement du mannequin">
+              <button
+                type="button"
+                onClick={() => setWalking((w) => !w)}
+                aria-pressed={walking}
+                title="Marche sur place (démarre une fois le vêtement cousu)"
+                className="rounded-full px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-ink aria-pressed:bg-ink aria-pressed:text-white"
+              >
+                Marche
+              </button>
+              <button
+                type="button"
+                onClick={turn}
+                title="Un tour complet sur le socle"
+                className="rounded-full px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-ink active:bg-ink active:text-white"
+              >
+                Tour
+              </button>
+            </div>
+          )}
           <div className="flex items-center gap-1 rounded-full border border-line bg-white/80 p-1 shadow-sm backdrop-blur">
             {VIEW_LABELS.map((v) => (
               <button
@@ -203,6 +247,19 @@ export default function Studio() {
               onTargets={body.setTargets}
               saturated={body.saturated}
               fitting={body.fitting}
+            />
+          )}
+          {tab === "pose" && (
+            <PosePanel
+              armSpread={armSpread}
+              // eslint-disable-next-line react-hooks/refs -- depends on the morphology, re-read on each render
+              restArmSpread={viewerRef.current?.restArmSpread ?? 40}
+              onArmSpread={setArmSpread}
+              cadence={cadence}
+              onCadence={setCadence}
+              walking={walking}
+              onWalking={setWalking}
+              onTurn={turn}
             />
           )}
           {tab === "patron" && (

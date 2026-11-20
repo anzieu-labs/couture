@@ -23,7 +23,20 @@ export interface AnnyMeta {
   pca: { rank: number; W: number[][]; b: number[] };
   localChanges: string[];
   targets: { name: string; scale: number }[];
-  bones: { labels: string[]; base: number[]; W: number[][]; localChanges: number[][] };
+  bones: {
+    labels: string[];
+    /** Index of each joint's parent in `labels` (-1: root). */
+    parents: number[];
+    base: number[];
+    W: number[][];
+    localChanges: number[][];
+  };
+}
+
+/** Per-vertex skin influences on the joints of `meta.bones` (4 per vertex, weights sum to 255). */
+export interface SkinWeights {
+  index: Uint8Array;
+  weight: Uint8Array;
 }
 
 export type Phenotype = Record<PhenotypeLabel, number>;
@@ -76,6 +89,8 @@ export class AnnyModel {
     readonly indices: Uint16Array | Uint32Array,
     /** Real-scale deltas for every target, in meta.targets order. */
     deltas: Float32Array[],
+    /** Skin influences, the same for every morphology. */
+    readonly skin: SkinWeights,
   ) {
     this.vertexCount = meta.vertexCount;
     const byName = new Map(meta.targets.map((t, i) => [t.name, deltas[i]]));

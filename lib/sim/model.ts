@@ -1,4 +1,5 @@
 import type { GarmentMesh } from "../pattern/mesh";
+import { buildSelfCollision, type SelfCollisionModel } from "./selfCollision";
 
 /**
  * Cloth constraint model shared by the CPU and GPU XPBD solvers.
@@ -11,7 +12,8 @@ import type { GarmentMesh } from "../pattern/mesh";
  *    (3B / (A0 + A1)) · |Σ Kᵢ xᵢ|², with constant cotangent weights Kᵢ: a
  *    linear, singularity-free constraint driven by the bending rigidity B (N·m);
  *  - hems / neck band: double layer → twice the mass, four times the rigidity;
- *  - sewing: seam vertex pairs pulled together, rest length ramping to 0.
+ *  - sewing: seam vertex pairs pulled together, rest length ramping to 0;
+ *  - self-collisions: see selfCollision.ts.
  *
  * Each constraint family is graph-coloured (no two constraints of a colour share
  * a vertex) and stored sorted by colour, so a colour can be solved in parallel.
@@ -37,6 +39,8 @@ export interface ClothParams {
   duration: number;
   /** Velocity damping (1/s). */
   damping: number;
+  /** Substeps between two self-collision passes (0: off). */
+  selfInterval: number;
 }
 
 export const DEFAULT_CLOTH: ClothParams = {
@@ -51,6 +55,7 @@ export const DEFAULT_CLOTH: ClothParams = {
   sewTime: 1.2,
   duration: 5,
   damping: 1.5,
+  selfInterval: 2,
 };
 
 /** Light load used to turn "elongation under light load" into a tensile modulus (N/m). */
@@ -87,6 +92,9 @@ export interface ClothModel {
   seamColors: ColorRanges;
   /** 1 for vertices on a seam (they may cross the body while sewing). */
   onSeam: Uint32Array;
+  triangles: Uint32Array;
+  /** Self-collisions (null: off). */
+  self: SelfCollisionModel | null;
 }
 
 /**
@@ -208,6 +216,9 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
   for (const v of mesh.seams) onSeam[v] = 1;
 
   const E = Uint32Array.from(edges), B = Uint32Array.from(bIdx);
+  const maxEdge = rest.reduce((m, l) => Math.max(m, l), 0);
+  const self = p.selfInterval > 0 ? buildSelfCollision(tri, E, mesh.seams, n, maxEdge, p.thickness, p.selfInterval) : null;
+
   const ec = colorConstraints(E, 2, n);
   const bc = colorConstraints(B, 4, n);
   const sc = colorConstraints(mesh.seams, 2, n);
@@ -227,12 +238,23 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
     seamStart: permute(seamStart, sc.order, 1),
     seamColors: sc.ranges,
     onSeam,
+    triangles: tri,
+    self,
   };
 }
+
+/**
+ * Self-collisions start this long after the seams are closed (s): pieces may
+ * cross while being sewn, and the passes keep each vertex on the side it was
+ * on — the garment first untangles under gravity. Before the body moves
+ * (avatar/motion.ts MOTION_DELAY).
+ */
+export const SELF_DELAY = 0.4;
 
 /** Per-substep scalars (same formulas on CPU and GPU). */
 export function substepState(p: ClothParams, time: number) {
   return {
+    selfActive: time > p.sewTime + SELF_DELAY,
     gravity: time > p.sewTime ? -9.81 : 0,
     /** Seam rest length factor: 1 → 0 while sewing. */
     sewK: Math.max(0, 1 - time / p.sewTime),
@@ -260,5 +282,10 @@ export class RestDetector {
     if (this.last) this.last.set(pos);
     else this.last = Float32Array.from(pos);
     return this.still >= this.frames;
+  }
+
+  /** Starts counting again (the body moved). */
+  reset() {
+    this.still = 0;
   }
 }

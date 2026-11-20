@@ -1,12 +1,23 @@
+import type { SkinWeights } from "../avatar/anny";
+
 /**
  * Signed distance field of the mannequin on a regular grid, used for cloth /
  * body collisions. Near the surface (narrow band) the distance is the
  * point-to-plane distance to the closest vertex (vertex normal); deeper cells are
  * classified inside/outside by a flood fill from the grid border.
+ *
+ * The field is built in the rest pose. With skin weights, each cell also gets
+ * the skin influences of its closest body vertex, so that an animated body can
+ * be collided with in rest space (see lib/sim/posedBody.ts).
  */
 /** Regular grid of signed distances (x fastest), as uploaded to the GPU. */
 export interface SdfGrid {
   readonly data: Float32Array;
+  /**
+   * Skin influences of the closest body vertex, 2 words per cell: 4 joint
+   * indices (one byte each), 4 weights (bytes summing to 255).
+   */
+  readonly skin: Uint32Array | null;
   readonly nx: number;
   readonly ny: number;
   readonly nz: number;
@@ -17,6 +28,7 @@ export interface SdfGrid {
 export class BodySdf implements SdfGrid {
   /** Distances, x fastest. */
   readonly data: Float32Array;
+  readonly skin: Uint32Array | null = null;
   readonly nx: number;
   readonly ny: number;
   readonly nz: number;
@@ -28,6 +40,7 @@ export class BodySdf implements SdfGrid {
     max: [number, number, number],
     readonly h = 0.01,
     band = 0.05,
+    skin?: SkinWeights,
   ) {
     const nx = (this.nx = Math.ceil((max[0] - min[0]) / h) + 1);
     const ny = (this.ny = Math.ceil((max[1] - min[1]) / h) + 1);
@@ -35,6 +48,7 @@ export class BodySdf implements SdfGrid {
     const n = nx * ny * nz;
     const sdf = (this.data = new Float32Array(n).fill(NaN));
     const best = new Float32Array(n).fill(Infinity);
+    const nearest = skin ? new Int32Array(n).fill(-1) : null;
     const r = Math.ceil(band / h);
 
     for (let v = 0; v < positions.length; v += 3) {
@@ -51,6 +65,7 @@ export class BodySdf implements SdfGrid {
             if (d2 < best[c]) {
               best[c] = d2;
               sdf[c] = gx * nxv + gy * nyv + gz * nzv;
+              if (nearest) nearest[c] = v / 3;
             }
           }
     }
@@ -105,6 +120,8 @@ export class BodySdf implements SdfGrid {
       }
       frontier = [...next];
     }
+
+    if (skin && nearest) this.skin = skinGrid(nearest, skin, nx, ny, nz);
   }
 
   /** Trilinear distance; large positive outside the grid. */
@@ -131,4 +148,40 @@ export class BodySdf implements SdfGrid {
     const l = Math.hypot(gx, gy, gz) || 1;
     out[0] = gx / l; out[1] = gy / l; out[2] = gz / l;
   }
+}
+
+/**
+ * Skin influences of the closest vertex for every cell: the narrow band knows
+ * it, the other cells inherit it breadth-first from their neighbours.
+ */
+function skinGrid(nearest: Int32Array, skin: SkinWeights, nx: number, ny: number, nz: number): Uint32Array {
+  const n = nearest.length;
+  const queue = new Int32Array(n);
+  let head = 0, tail = 0;
+  for (let c = 0; c < n; c++) if (nearest[c] >= 0) queue[tail++] = c;
+  while (head < tail) {
+    const c = queue[head++];
+    const i = c % nx, j = Math.floor(c / nx) % ny, k = Math.floor(c / (nx * ny));
+    const visit = (d: number) => {
+      if (nearest[c + d] < 0) {
+        nearest[c + d] = nearest[c];
+        queue[tail++] = c + d;
+      }
+    };
+    if (i > 0) visit(-1);
+    if (i < nx - 1) visit(1);
+    if (j > 0) visit(-nx);
+    if (j < ny - 1) visit(nx);
+    if (k > 0) visit(-nx * ny);
+    if (k < nz - 1) visit(nx * ny);
+  }
+  const out = new Uint32Array(2 * n);
+  const index = new Uint32Array(skin.index.buffer, skin.index.byteOffset, skin.index.length / 4);
+  const weight = new Uint32Array(skin.weight.buffer, skin.weight.byteOffset, skin.weight.length / 4);
+  for (let c = 0; c < n; c++) {
+    const v = Math.max(0, nearest[c]);
+    out[2 * c] = index[v];
+    out[2 * c + 1] = weight[v];
+  }
+  return out;
 }

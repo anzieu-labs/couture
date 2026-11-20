@@ -10,10 +10,13 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
 - **Patron** : t‑shirt col rond tracé depuis les mesures du corps (`lib/pattern/tshirt.ts`), 4 pièces,
   coutures appariées, maillage Delaunay contraint (Delaunator + Constrainautor).
 - **Simulation** : XPBD (étirement anisotrope, flexion isométrique de Bergou, ourlets doublés,
-  couture progressive, contact SDF avec le corps). GPU (WebGPU compute, sur le device du rendu,
+  couture progressive, contact SDF avec le corps, auto-collision sommet ↔ triangle). GPU (WebGPU compute, sur le device du rendu,
   coque épaisse calculée sur le GPU, sans relecture) ou CPU en repli (worker).
 - **Tissus** : 10 textiles procéduraux avec propriétés physiques (grammage, rigidité en flexion,
   élasticité chaîne/trame, épaisseur, frottement).
+- **Pose et mouvement** : squelette d'Anny réduit à 27 articulations (skinning LBS), écartement des
+  bras réglable, marche sur place (vitesse réglable) et tour complet ; le tissu suit (collision en
+  espace repos).
 
 ## 1. Rendre l'outil utile à quelqu'un qui coud
 
@@ -35,9 +38,54 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
 
 ## 3. Réalisme de la simulation
 
-- [ ] **Auto-collision** du tissu (hachage spatial sur GPU) — prérequis aux vêtements multicouches
-  et aux plis profonds.
-- [ ] **Animation du mannequin** (marche, rotation) via le squelette d'Anny.
+- [x] **Auto-collision** du tissu (`lib/sim/selfCollision.ts`, `lib/sim/untangle.ts`, noyaux
+  `self*WGSL`), distance minimale entre couches = épaisseur + 2 mm :
+  - **sommet ↔ triangle** (× ½, l'autre couche fait l'autre moitié) et **arête ↔ arête** (points
+    les plus proches, correction répartie PBD sur les 4 extrémités) — l'arête ↔ arête attrape les
+    couches qui se croisent en biais et les coutures repliées à plat, où aucun sommet ne tombe dans
+    un triangle. Corrections moyennées par sommet (Jacobi) ;
+  - côté mémorisé à la passe précédente (un élément qui a traversé est renvoyé de son côté) ;
+  - hachage spatial par tri par comptage (compte, préfixe sur un groupe de travail, remplissage),
+    sans limite de capacité par case ; triangles et arêtes dans deux grilles. L'arête ↔ arête,
+    coûteuse (~300 candidates par arête), ne porte que sur les arêtes proches d'une autre couche
+    (marquées par le passage sommet ↔ triangle) et seules celles-ci sont hachées : sans ce tri, la
+    marche tombait à ~27 i/s ; avec, 120 i/s ;
+  - **démêlage** (analyse globale des intersections, Baraff et al. 2003) toutes les 0,2 s simulées :
+    arêtes qui traversent un triangle coupées, le vêtement découpé le long ; une petite île
+    (contour fermé) est du mauvais côté → côté imposé par une direction de correction, elle est
+    repoussée à travers ; contour ouvert (bord libre, couture repliée) → sommets « libérés »
+    (aucun côté imposé) jusqu'à la prochaine analyse, l'élasticité les démêle. Sur GPU, positions
+    relues de façon asynchrone et analyse dans le worker ;
+  - une passe tous les 2 sous-pas (GPU), 5 (CPU) ; démarre 0,4 s après la couture (`SELF_DELAY`,
+    filet de sécurité : le démêlage défait aussi un croisement figé dès la fin de la couture).
+  Mesures (croisements arête ↔ triangle en moyenne, maillage et réglages GPU) : marche bras à 20°
+  106 sans auto-collision → 4,8 sommet ↔ triangle seul → 0 avec arête ↔ arête et démêlage ; bras à
+  15° 206 → 66 → 0 ; tour bras à 15° 97 → 76 → 0. Nappes emmêlées sur un disque de 3 cm : figées
+  sans démêlage (76 croisements), démêlées en 20 passes avec.
+  *Limites* : bras sous 20° (épaule écrasée par le skinning : c'est la peau qui pince la manche) ; une île plus grande que 15 % du
+  vêtement n'est pas retournée (heuristique de Baraff : la petite région est la fautive) ; pour
+  plusieurs vêtements, il faudra ordonner les couches (côté imposé entre vêtements).
+- [x] **Animation du mannequin** (onglet « Pose » + boutons Marche / Tour) : écartement des bras
+  (20–70°), marche sur place en boucle (60–150 pas/min, foulée proportionnelle), un tour complet sur
+  le socle. Le vêtement est toujours cousu dans la pose de repos (bras en A) ; la pose choisie
+  s'applique après la couture (`MOTION_DELAY`). Collision « en espace repos » : chaque sommet du
+  tissu est ramené dans la pose de repos par l'inverse de la transformation mélangée (poids de la
+  grille d'influences dérivée du SDF), testé contre le SDF de repos puis reposé ; frottement relatif
+  à la peau. Deux itérations de point fixe + test de cohérence (|M₁·q₀ − p| < 5 mm) : là où le
+  bras libère l'espace qu'il occupait au repos (bras levés), l'antécédent est ambigu (dans le torse
+  avec les poids du bras, dans le bras de repos avec ceux du torse) ; sans ce test le tissu y était
+  expulsé le long du bras et tout le t-shirt remontait. Écart corps de collision / peau rendue :
+  p99 0,3 mm. Aucune pénétration mesurée
+  (jersey, denim) contre un SDF indépendant du corps posé.
+  Marche pilotée par les pieds (comme sur un tapis roulant) : en appui le pied est au sol et recule
+  à vitesse constante (talon, pied à plat, pointe), en oscillation il revient sur un arc ; IK à deux
+  segments hanche-genou, inclinaison du pied à la cheville, bassin abaissé au double appui juste
+  assez pour que la jambe avant touche le sol (oscillation verticale ~3 cm). Les deux pieds touchent
+  donc le sol ensemble quelle que soit la morphologie (±3 mm) ; des courbes d'angles imposées
+  faisaient flotter un pied et enfoncer l'autre, et le corps sautillait de l'un à l'autre.
+  *Limites* : marche sur place (le pied d'appui glisse comme sur un tapis), écartement des bras
+  limité à 20° (en dessous, le skinning écrase le dessus de l'épaule et pince la manche), solveur
+  CPU ~3× plus lent quand le corps bouge (la marche passe au ralenti si le processeur ne suit pas).
 - [ ] Arrêt de la simulation au repos réellement efficace (mesure du mouvement plus fréquente).
 - [ ] Rigidité réelle des tissés : l'étirement résiduel décroît en h² (10 sous-pas : 7,5 %,
   20 : 2,7 %, 40 : 1 % en haut du devant, denim). Pistes : plus d'itérations d'étirement,
@@ -73,3 +121,11 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   coude). Un cylindre droit faisait traverser la manche par l'avant-bras (manches longues).
 - Le champ de distance du corps a une vraie distance à l'intérieur (transformée de distance), pour
   qu'un point enfoncé soit toujours repoussé vers l'extérieur.
+- Animation : `lib/avatar/skeleton.ts` (cinématique directe, rotations en axes du monde au repos
+  autour des têtes d'os : valable pour toute morphologie), `lib/avatar/motion.ts` (`Animator`,
+  fonction pure du temps, rejouée à l'identique par le worker), `lib/sim/posedBody.ts` (collision en
+  espace repos, mêmes formules que le noyau `contactsWGSL`). En mode GPU l'horloge d'animation suit
+  le temps simulé (temps réel pendant un mouvement, avance rapide sinon) ; en mode CPU le worker
+  possède la chronologie et envoie la pose avec chaque image.
+- Après un nouvel export du mannequin, la grille d'influences (`BodySdf.skin`) dépend des attributs
+  `JOINTS_0` / `WEIGHTS_0` du GLB et de `bones.parents` du JSON.

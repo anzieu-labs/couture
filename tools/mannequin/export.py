@@ -81,7 +81,9 @@ LOCAL_CHANGES = [
     "stomach-pregnant-incr",
 ]
 
-# Skeleton joints exported as landmarks (garment placement, measurement bands).
+# Skeleton joints exported as landmarks (garment placement, measurement bands) and as
+# the animation rig: the skin weights of every other bone (fingers, toes, twist bones,
+# eyes…) are merged into its closest ancestor in this list.
 KEY_BONES = [
     "root", "pelvis.L", "pelvis.R", "upperleg01.L", "upperleg01.R",
     "lowerleg01.L", "lowerleg01.R", "foot.L", "foot.R",
@@ -90,6 +92,9 @@ KEY_BONES = [
     "upperarm01.L", "upperarm01.R", "lowerarm01.L", "lowerarm01.R",
     "wrist.L", "wrist.R", "neck01", "neck03", "head",
 ]
+
+# Skin influences kept per vertex (glTF JOINTS_0 / WEIGHTS_0).
+SKIN_INFLUENCES = 4
 
 # Anny frame: Z up, front = -Y (Blender). glTF frame: Y up, front = +Z.
 def to_gltf(p: np.ndarray) -> np.ndarray:
@@ -121,6 +126,7 @@ def main() -> None:
     Bb = model.bone_heads_blendshapes[:, bone_idx]  # (K, nb, 3)
     bone_template = model.template_bone_heads[bone_idx]
     anchors = {k: model.anchors[k] for k in [p[0] for p in PHENOTYPES]}
+    key_parents, skin_index, skin_weight = skin_rig(model)
 
     def macro_weights(params: torch.Tensor) -> torch.Tensor:
         return phenotype_blendshape_weights(
@@ -203,7 +209,7 @@ def main() -> None:
 
     # --- GLB -------------------------------------------------------------------
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    scales = write_glb(OUT_DIR / "mannequin.glb", base, faces, targets)
+    scales = write_glb(OUT_DIR / "mannequin.glb", base, faces, targets, skin_index, skin_weight)
 
     def bones_to_gltf(flat: np.ndarray) -> list:
         return np.round(to_gltf(flat.reshape(-1, len(KEY_BONES), 3)), 6).reshape(flat.shape[0], -1).tolist()
@@ -232,6 +238,8 @@ def main() -> None:
         "targets": [{"name": n, "scale": s} for (n, _), s in zip(targets, scales)],
         "bones": {
             "labels": KEY_BONES,
+            # Index of each joint's parent in `labels` (-1: root); skin weights in the GLB.
+            "parents": key_parents,
             "base": np.round(to_gltf(b_bone.numpy().reshape(-1, 3)), 6).reshape(-1).tolist(),
             "W": bones_to_gltf(W_bone[keep].numpy()),
             "localChanges": bones_to_gltf(lc_bone_deltas.reshape(len(lc_bone_deltas), -1)),
@@ -242,10 +250,50 @@ def main() -> None:
         print(f"{f}: {(OUT_DIR / f).stat().st_size / 1e6:.2f} MB")
 
 
+# --- Skinning rig ------------------------------------------------------------------
+
+def skin_rig(model) -> tuple[list[int], np.ndarray, np.ndarray]:
+    """
+    Reduces Anny's skeleton to KEY_BONES: each bone maps to its closest ancestor in
+    the list (itself if listed), and its skin weights are summed there. Keeps the
+    SKIN_INFLUENCES largest weights per vertex, quantized to bytes summing to 255.
+    Returns the parent of each key bone (index in KEY_BONES), joint indices and weights.
+    """
+    labels, parents = model.bone_labels, model.bone_parents
+
+    def key_ancestor(b: int) -> int:
+        while labels[b] not in KEY_BONES:
+            b = parents[b]
+        return KEY_BONES.index(labels[b])
+
+    to_key = np.array([key_ancestor(b) for b in range(len(labels))])
+    key_parents = [-1 if parents[labels.index(k)] < 0 else key_ancestor(parents[labels.index(k)]) for k in KEY_BONES]
+
+    w = model.vertex_bone_weights.numpy()
+    idx = model.vertex_bone_indices.numpy()
+    nv = w.shape[0]
+    dense = np.zeros((nv, len(KEY_BONES)))
+    np.add.at(dense, (np.repeat(np.arange(nv), w.shape[1]), to_key[idx].reshape(-1)), w.reshape(-1))
+    top = np.argsort(-dense, axis=1)[:, :SKIN_INFLUENCES]
+    tw = np.take_along_axis(dense, top, 1)
+    tw /= tw.sum(1, keepdims=True)
+    q = np.floor(tw * 255 + 0.5).astype(np.int32)
+    q[:, 0] += 255 - q.sum(1)  # exact sum on the largest weight
+    top[q == 0] = 0
+    print(f"skin: {(dense > 0).sum(1).max()} influences max → {SKIN_INFLUENCES}, "
+          f"weight dropped ≤ {(1 - np.sort(dense, 1)[:, ::-1][:, :SKIN_INFLUENCES].sum(1)).max():.3f}")
+    return key_parents, top.astype(np.uint8), q.astype(np.uint8)
+
+
 # --- Minimal GLB writer --------------------------------------------------------
 
-def write_glb(path: Path, positions: np.ndarray, faces: np.ndarray, targets) -> list[float]:
-    """Writes one mesh with int16-normalized morph targets. Returns each target's scale."""
+def write_glb(path: Path, positions: np.ndarray, faces: np.ndarray, targets,
+              skin_index: np.ndarray, skin_weight: np.ndarray) -> list[float]:
+    """
+    Writes one mesh with int16-normalized morph targets and per-vertex skin
+    influences (JOINTS_0 / WEIGHTS_0, no glTF skin: the rig is in the JSON).
+    Returns each target's scale.
+    """
     chunks: list[bytes] = []
     views, accessors = [], []
     offset = 0
@@ -269,6 +317,14 @@ def write_glb(path: Path, positions: np.ndarray, faces: np.ndarray, targets) -> 
     pos_acc = add_accessor(
         bufferView=add_view(pos.tobytes(), 34962), componentType=5126, count=len(pos),
         type="VEC3", min=pos.min(0).tolist(), max=pos.max(0).tolist(),
+    )
+    joints_acc = add_accessor(
+        bufferView=add_view(skin_index.tobytes(), 34962), componentType=5121,
+        count=len(skin_index), type="VEC4",
+    )
+    weights_acc = add_accessor(
+        bufferView=add_view(skin_weight.tobytes(), 34962), componentType=5121,
+        normalized=True, count=len(skin_weight), type="VEC4",
     )
     idx_type = 5123 if faces.dtype == np.uint16 else 5125
     idx_acc = add_accessor(
@@ -310,7 +366,8 @@ def write_glb(path: Path, positions: np.ndarray, faces: np.ndarray, targets) -> 
         "nodes": [{"name": "mannequin", "mesh": 0}],
         "meshes": [{
             "name": "mannequin",
-            "primitives": [{"attributes": {"POSITION": pos_acc}, "indices": idx_acc,
+            "primitives": [{"attributes": {"POSITION": pos_acc, "JOINTS_0": joints_acc, "WEIGHTS_0": weights_acc},
+                            "indices": idx_acc,
                             "targets": gltf_targets}],
             "weights": [0.0] * len(gltf_targets),
             "extras": {"targetNames": names},

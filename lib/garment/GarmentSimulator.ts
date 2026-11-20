@@ -1,4 +1,4 @@
-import type { DressRequest, WorkerRequest, WorkerResponse } from "./protocol";
+import type { DressRequest, MotionRequest, WorkerRequest, WorkerResponse } from "./protocol";
 
 export interface SimulatorEvents {
   /** A new garment mesh (flat rest coordinates double as UVs). */
@@ -6,7 +6,10 @@ export interface SimulatorEvents {
   onMesh: (mesh: Extract<WorkerResponse, { type: "mesh" }>) => void;
   /** GPU mode: a prepared cloth model to simulate on the renderer's device. */
   onModel: (model: Extract<WorkerResponse, { type: "model" }>) => void;
-  onFrame: (positions: Float32Array, progress: number) => void;
+  /** CPU mode: simulated positions, and the body pose they were simulated with (null: rest). */
+  onFrame: (positions: Float32Array, progress: number, bones: Float32Array | null) => void;
+  /** GPU mode: tangled regions of the positions sent with `untangle`. */
+  onTangles: (tangle: Float32Array) => void;
 }
 
 /** Main-thread handle on the garment simulation worker. */
@@ -21,7 +24,8 @@ export class GarmentSimulator {
       if (msg.id !== this.id) return; // stale
       if (msg.type === "mesh") this.events.onMesh(msg);
       else if (msg.type === "model") this.events.onModel(msg);
-      else if (msg.type === "frame") this.events.onFrame(msg.positions, msg.progress);
+      else if (msg.type === "frame") this.events.onFrame(msg.positions, msg.progress, msg.bones);
+      else if (msg.type === "tangles") this.events.onTangles(msg.tangle);
       else console.error("Garment simulation failed:", msg.message);
     };
   }
@@ -29,6 +33,16 @@ export class GarmentSimulator {
   dress(req: Omit<DressRequest, "type" | "id">) {
     const msg: WorkerRequest = { type: "dress", id: ++this.id, ...req };
     this.worker.postMessage(msg);
+  }
+
+  /** CPU mode: walk / turn request for the garment being simulated in the worker. */
+  motion(req: Omit<MotionRequest, "type">) {
+    this.worker.postMessage({ type: "motion", ...req } satisfies WorkerRequest);
+  }
+
+  /** GPU mode: asks for the intersection analysis of the current garment's positions. */
+  untangle(positions: Float32Array) {
+    this.worker.postMessage({ type: "tangles", id: this.id, positions } satisfies WorkerRequest, [positions.buffer]);
   }
 
   cancel() {
