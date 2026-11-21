@@ -173,12 +173,26 @@ en place 3D par type dans `lib/garment/place.ts`.
   mesurée sur le corps), sans distorsion ; capuche en deux panneaux verticaux de part et d'autre de la
   tête. Le tissu tombe ensuite en pendule autour des épaules : amortissement 6 /s (sur-amorti), sinon
   le bas passe sous la cape, s'y coince et s'emmêle. Maillage 2,2× plus lâche (~11 000 sommets GPU).
-  *Limites* : bouts des doigts qui traversent (doigts plus fins que le champ de distance) ; 50 pages A4
-  pour la longueur par défaut (le SVG sur traceur est plus adapté).
+  Bouts des doigts qui traversaient la cape : la collision ne teste que les sommets du tissu, et les
+  triangles de la cape (2,2 cm) sont plus larges qu'un doigt ; corrigé en « gonflant » les mains de
+  1,2 cm dans le champ de distance (moufle : distance réduite selon le poids de peau des poignets,
+  `BodySdf` option `inflate`), commun GPU / CPU.
+  Cape éjectée en marchant bras le long du corps : le tissu pincé entre la main et la cuisse se
+  croisait ; l'analyse globale des croisements (untangle.ts) découpait alors la cape en milliers de
+  fragments (1 région, puis 95, 2 000… 10 000 sur 12 600 sommets en 15 s) et imposait un côté à chacun :
+  l'auto-collision poussait presque tout le tissu dans des sens contraires, ce qui créait d'autres
+  croisements — emballement jusqu'à l'éjection. Au-delà de 24 régions ou de 5 % du vêtement, l'analyse
+  libère désormais les sommets concernés au lieu de les forcer (comme pour un contour ouvert) : 0 à 7
+  petites régions pendant toute la marche, cape stable sur 3 essais de 30 s. Essais sans effet, retirés :
+  plafonner la vitesse ou le déplacement d'un contact (pire), chercher plusieurs antécédents au repos
+  (main et cuisse vues ensemble ; pas d'effet mesurable).
+  *Limite* : 50 pages A4 pour la longueur par défaut (le SVG sur traceur est plus adapté).
 - [x] **Jupe trapèze** (`lib/pattern/skirt.ts`) : devant et dos (au pli), sans pinces (galbe pris
   dans la couture de côté, de la hanche à la taille), évasement réglable, bas d'équerre avec le côté.
   Placement rang par rang : chaque ligne horizontale du patron enroulée sur une ellipse autour de la
   section du corps à cette hauteur (jambes réunies sous l'entrejambe), de périmètre égal à sa largeur.
+  *Bug ouvert* : la jupe tient à la taille au repos mais glisse et tombe dès qu'on lance la marche
+  (constaté 2026-11, avec ou sans le correctif de l'analyse des croisements ; cause non étudiée).
 - [ ] Pantalon (entrejambe, jambes).
 
 ## 5. Socle technique

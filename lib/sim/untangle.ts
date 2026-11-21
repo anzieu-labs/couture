@@ -29,6 +29,19 @@ export const FREE = -1;
 /** A piece larger than this fraction of the garment is not a tangle (e.g. a whole sleeve cut off). */
 const MAX_REGION = 0.15;
 
+/**
+ * Past this many regions, or this fraction of the garment in regions, the analysis is
+ * not a few islands that went through a layer but cloth crumpled or pinched into a
+ * mess of crossings (a cape caught between the hand and the thigh, arms down,
+ * walking): imposing a side on each fragment makes the self-collision push almost
+ * every vertex in contradictory directions, which creates more crossings — a
+ * runaway (1 region, then 95, 2 000, 10 000 of 12 600 vertices in 15 s) that flung
+ * the cape off the body. Then everything involved is released instead, and the
+ * fabric's elasticity untangles it.
+ */
+const MAX_REGIONS = 24;
+const MAX_TANGLED = 0.05;
+
 export function findTangles(pos: Float32Array, triangles: Uint32Array, self: SelfCollisionModel, out?: Float32Array): Float32Array {
   const n = pos.length / 3;
   const { edges: E, canon } = self;
@@ -116,7 +129,19 @@ export function findTangles(pos: Float32Array, triangles: Uint32Array, self: Sel
       if (!labels.has(r)) labels.set(r, labels.size + 1);
     }
   }
-  for (let i = 0; i < n; i++) region[i] = labels.get(find(i)) ?? -1;
+  let tangled = 0;
+  for (let i = 0; i < n; i++) {
+    region[i] = labels.get(find(i)) ?? -1;
+    if (region[i] >= 0) tangled++;
+  }
+  if (labels.size > MAX_REGIONS || tangled > MAX_TANGLED * n) {
+    for (let i = 0; i < n; i++) if (region[i] >= 0) result[4 * i + 3] = FREE;
+    for (let c = 0; c < crossings.length; c += 2) {
+      const e = crossings[c], t = crossings[c + 1];
+      for (const i of [E[2 * e], E[2 * e + 1], triangles[3 * t], triangles[3 * t + 1], triangles[3 * t + 2]]) result[4 * i + 3] = FREE;
+    }
+    return result;
+  }
 
   // Open contours: crossings with no tangled region on either side of the edge.
   for (let c = 0; c < crossings.length; c += 2) {
