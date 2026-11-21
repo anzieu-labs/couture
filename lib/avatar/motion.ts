@@ -1,3 +1,4 @@
+import { armIK, restPole } from "./armIK";
 import { axisAngle, identityBones, type Mat3, mul3, type Pose, rotX, rotY, rotZ, type Skeleton, type Vec3 } from "./skeleton";
 
 /**
@@ -8,7 +9,10 @@ import { axisAngle, identityBones, type Mat3, mul3, type Pose, rotX, rotY, rotZ,
  *    adjustable cadence (the stride grows a little with it);
  *  - turn: one full turn on the spot, eased in and out, back facing the front;
  *  - arms: spread of the arms (angle from the body, in the frontal plane),
- *    eased towards its target; also held when the body is still.
+ *    eased towards its target; also held when the body is still;
+ *  - hands: a wrist target per arm (dragged in the 3D view), reached by
+ *    two-bone inverse kinematics (armIK.ts); it overrides the spread and the
+ *    walk's swing for that arm, eased in and out.
  *
  * The walk is driven by the feet (as on a treadmill): in stance the foot is
  * on the floor and slides backwards at constant speed (heel strike, flat
@@ -34,18 +38,29 @@ export const MOTION_DELAY = 0.8;
 export const SETTLE_TIME = 3;
 
 const DEG = Math.PI / 180;
+export type Side = "L" | "R";
 /** Fade in / out of the walk (s). */
 const BLEND = 0.6;
 /** Steps per minute: default (one gait cycle = two steps), and the slider range. */
 export const CADENCE = { default: 110, min: 60, max: 150 };
 /** Arm spread (degrees from the body) offered by the slider; below ~20° the skinned shoulder collapses and pinches the sleeve. */
 export const ARM_SPREAD = { min: 20, max: 70 };
+/** Default arm spread once the garment is sewn: along the body (the rest pose is an A-pose). */
+export const DEFAULT_ARM_SPREAD = ARM_SPREAD.min;
 /** Easing of an arm spread or stride change (s). */
 const ARM_TIME = 0.8;
+/** Easing of a hand target while it is dragged (s): smooth, yet follows the pointer. */
+const HAND_TIME = 0.2;
 /** One turn (s). */
 const TURN_TIME = 6;
 /** Elbows straightened while walking (the rest pose's forearms point forward). */
 const ELBOW_EXTENSION = 25 * DEG;
+/**
+ * Elbows straightened as the arms come down from the rest pose (full at the lowest
+ * spread): the rest pose's elbows are bent by ~44°, forearms pointing forward, which
+ * looks stiff with the arms along the body; straightened, they hang (~9° left).
+ */
+const ELBOW_RELAX = 35 * DEG;
 /** Legs brought closer while walking (the rest pose stands with feet apart). */
 const LEG_ADDUCTION = 4 * DEG;
 const SPINE = ["spine04", "spine03", "spine02", "spine01"];
@@ -130,6 +145,13 @@ export class Animator {
   private arms = { from: 0, to: 0, start: -Infinity };
   /** Requested arm spread (degrees from the body); null: rest pose. */
   private armSpread: number | null = null;
+  /**
+   * Wrist target per arm (rest frame), eased from `from` to `to` over `time` from `start`;
+   * `release`: easing back to the arm-spread pose, after which the arm is no longer driven.
+   */
+  private hands: Record<Side, { from: Vec3; to: Vec3; start: number; time: number; release: boolean } | null> = { L: null, R: null };
+  /** Requested wrist targets (kept across a reset, restored like the arm spread). */
+  private handRequest: Record<Side, Vec3 | null> = { L: null, R: null };
   private notBefore = -Infinity;
   private elbowAxes: Record<"L" | "R", Vec3> = { L: [1, 0, 0], R: [1, 0, 0] };
   private legs = {} as Record<"L" | "R", Leg>;
@@ -187,6 +209,7 @@ export class Animator {
   reset() {
     this.walk = this.turn = null;
     this.arms = { from: 0, to: 0, start: -Infinity };
+    this.hands = { L: null, R: null };
     this.notBefore = -Infinity;
   }
 
@@ -219,9 +242,62 @@ export class Animator {
     this.arms = { from: this.armAdduction(t), to, start: Math.max(t, this.notBefore) };
   }
 
-  /** Re-applies the requested arm spread from time t (after a reset, or with a new skeleton). */
+  /** Re-applies the requested arm spread and hand targets from time t (after a reset, or with a new skeleton). */
   restoreArmSpread(t: number) {
     this.setArmSpread(this.armSpread, t);
+    for (const side of ["L", "R"] as const) {
+      const target = this.handRequest[side];
+      if (target) this.setHandTarget(side, target, t, ARM_TIME);
+    }
+  }
+
+  /** Requested wrist targets (rest frame); null: the arm follows the spread. */
+  get handTargets(): Record<Side, Vec3 | null> {
+    return { ...this.handRequest };
+  }
+
+  /**
+   * Drives an arm's wrist to `target` (rest frame, m) from time t, eased over
+   * `time`; null releases it back to the arm-spread pose.
+   */
+  setHandTarget(side: Side, target: Vec3 | null, t: number, time = HAND_TIME) {
+    this.handRequest[side] = target;
+    const current = this.wristTarget(side, t) ?? this.spreadWrist(side, this.armAdduction(t));
+    if (!target) {
+      if (this.hands[side]) this.hands[side] = { from: current, to: this.spreadWrist(side, this.arms.to), start: t, time: ARM_TIME, release: true };
+      return;
+    }
+    this.hands[side] = { from: current, to: [...target], start: Math.max(t, this.notBefore), time, release: false };
+  }
+
+  /** Wrist target of a driven arm at time t (null: not driven). */
+  private wristTarget(side: Side, t: number): Vec3 | null {
+    const h = this.hands[side];
+    if (!h) return null;
+    const k = smoothstep(clamp01((t - h.start) / h.time));
+    if (h.release && k >= 1) return null;
+    return [h.from[0] + (h.to[0] - h.from[0]) * k, h.from[1] + (h.to[1] - h.from[1]) * k, h.from[2] + (h.to[2] - h.from[2]) * k];
+  }
+
+  /** Wrist of the arm-spread pose (rest frame) for an adduction (rad): where a released hand goes. */
+  private spreadWrist(side: Side, adduction: number): Vec3 {
+    const s = this.skel;
+    const S = s.head(`upperarm01.${side}`), E = s.head(`lowerarm01.${side}`), W = s.head(`wrist.${side}`);
+    const sign = side === "L" ? 1 : -1;
+    const lowest = (this.restArmSpread - ARM_SPREAD.min) * DEG;
+    const relax = lowest > 0 ? ELBOW_RELAX * clamp01(adduction / lowest) : 0;
+    const ra = rotZ(-sign * adduction), re = axisAngle(this.elbowAxes[side], -relax);
+    const apply = (m: Mat3, v: Vec3): Vec3 => [m[0] * v[0] + m[1] * v[1] + m[2] * v[2], m[3] * v[0] + m[4] * v[1] + m[5] * v[2], m[6] * v[0] + m[7] * v[1] + m[8] * v[2]];
+    const f = apply(re, [W[0] - E[0], W[1] - E[1], W[2] - E[2]]);
+    const w = apply(ra, [E[0] - S[0] + f[0], E[1] - S[1] + f[1], E[2] - S[2] + f[2]]);
+    return [S[0] + w[0], S[1] + w[1], S[2] + w[2]];
+  }
+
+  private handsMoving(t: number): boolean {
+    return (["L", "R"] as const).some((side) => {
+      const h = this.hands[side];
+      return !!h && t > h.start && t < h.start + h.time;
+    });
   }
 
   /** Eases back to the rest pose from time t (walk and arms), keeping the requested arm spread. */
@@ -229,6 +305,10 @@ export class Animator {
     this.setWalking(false, t);
     const from = this.armAdduction(t);
     if (from !== 0 || this.arms.to !== 0) this.arms = { from, to: 0, start: t };
+    for (const side of ["L", "R"] as const) {
+      const current = this.wristTarget(side, t);
+      if (current) this.hands[side] = { from: current, to: this.skel.head(`wrist.${side}`), start: t, time: ARM_TIME, release: true };
+    }
   }
 
   /** Walking cadence (steps per minute), from time t. */
@@ -287,7 +367,8 @@ export class Animator {
     return (
       (!!w && t > w.rampStart && t < w.stop + BLEND) ||
       (!!this.turn && t > this.turn.start && t < this.turnEnd) ||
-      (this.arms.from !== this.arms.to && t > this.arms.start && t < this.arms.start + ARM_TIME)
+      (this.arms.from !== this.arms.to && t > this.arms.start && t < this.arms.start + ARM_TIME) ||
+      this.handsMoving(t)
     );
   }
 
@@ -296,7 +377,8 @@ export class Animator {
     return (
       (!!this.walk && t < this.walk.stop + BLEND) ||
       (!!this.turn && t < this.turnEnd) ||
-      (this.arms.from !== this.arms.to && t < this.arms.start + ARM_TIME)
+      (this.arms.from !== this.arms.to && t < this.arms.start + ARM_TIME) ||
+      (["L", "R"] as const).some((side) => !!this.hands[side] && t < this.hands[side]!.start + this.hands[side]!.time)
     );
   }
 
@@ -307,7 +389,8 @@ export class Animator {
   sample(t: number, out: Float32Array): boolean {
     const s = this.skel;
     const adduction = this.armAdduction(t);
-    if (!this.moving(t) && adduction === 0) {
+    const driven = { L: this.wristTarget("L", t), R: this.wristTarget("R", t) };
+    if (!this.moving(t) && adduction === 0 && !driven.L && !driven.R) {
       identityBones(s.count, out);
       return false;
     }
@@ -318,6 +401,9 @@ export class Animator {
     };
 
     const level = t > (this.walk?.rampStart ?? Infinity) ? smoothstep(this.walkLevel(t)) : 0;
+    // Arms lowered from the rest pose: elbows relaxed in proportion (none when raised).
+    const lowest = (this.restArmSpread - ARM_SPREAD.min) * DEG;
+    const relax = lowest > 0 ? ELBOW_RELAX * clamp01(adduction / lowest) : 0;
     let offset: Vec3 | null = null;
     if (level > 0) {
       const w = this.walk!;
@@ -371,7 +457,8 @@ export class Animator {
         // the elbow straightens from the rest pose, whose forearms point forward.
         const swing = -Math.cos(2 * Math.PI * p);
         set(`upperarm01.${side}`, rotX(-(2 + 14 * swing) * k));
-        set(`lowerarm01.${side}`, axisAngle(this.elbowAxes[side], (6 + 5 * swing) * k - ELBOW_EXTENSION * level));
+        // Straightened by the larger of the walk's and the lowered arms' extension (the latter below).
+        set(`lowerarm01.${side}`, axisAngle(this.elbowAxes[side], (6 + 5 * swing) * k - Math.max(0, ELBOW_EXTENSION * level - relax)));
       }
     }
 
@@ -381,6 +468,18 @@ export class Animator {
         const i = s.index[`upperarm01.${side}`];
         if (i !== undefined) rot[i] = rot[i] ? mul3(rot[i]!, rotZ(-sign * adduction)) : rotZ(-sign * adduction);
       }
+    if (relax > 0) for (const side of ["L", "R"] as const) set(`lowerarm01.${side}`, axisAngle(this.elbowAxes[side], -relax));
+
+    // Driven hands: inverse kinematics replaces the spread and the swing of that arm.
+    for (const side of ["L", "R"] as const) {
+      const target = driven[side];
+      if (!target) continue;
+      const S = s.head(`upperarm01.${side}`), E = s.head(`lowerarm01.${side}`), W = s.head(`wrist.${side}`);
+      const { upper, fore } = armIK(S, E, W, target, restPole(S, E, W));
+      const iu = s.index[`upperarm01.${side}`], il = s.index[`lowerarm01.${side}`];
+      if (iu !== undefined) rot[iu] = upper;
+      if (il !== undefined) rot[il] = fore;
+    }
 
     if (this.turn && t > this.turn.start && t < this.turnEnd)
       set("root", rotY(2 * Math.PI * smootherstep((t - this.turn.start) / TURN_TIME)));

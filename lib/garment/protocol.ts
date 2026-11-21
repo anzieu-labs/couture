@@ -1,5 +1,6 @@
 import type { SkinWeights } from "../avatar/anny";
 import type { TorsoFrame } from "../avatar/bodyMeasures";
+import type { Side } from "../avatar/motion";
 import type { Pattern } from "../pattern/types";
 import type { SdfGrid } from "../sim/bodySdf";
 import type { ClothModel, ClothParams } from "../sim/model";
@@ -37,6 +38,8 @@ export interface MotionSettings {
   cadence: number;
   /** Arm spread (degrees from the body); null: rest pose. */
   arms: number | null;
+  /** Wrist targets (rest frame, m) of the arms placed by hand; null: the arm follows the spread. */
+  hands: Record<Side, [number, number, number] | null>;
 }
 
 /** "cpu" mode: motion changes, applied at the simulation's current time. */
@@ -46,6 +49,8 @@ export interface MotionRequest {
   turn?: boolean;
   cadence?: number;
   arms?: number | null;
+  /** Wrist target of one arm (rest frame, m); null releases it. */
+  hand?: { side: Side; target: [number, number, number] | null };
 }
 
 /** "gpu" mode: global intersection analysis (sim/untangle.ts) of read-back positions. */

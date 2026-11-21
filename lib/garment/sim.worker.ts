@@ -132,6 +132,10 @@ async function dress(req: DressRequest) {
   animator.holdUntil(params.sewTime + params.settleTime + MOTION_DELAY);
   animator.setCadence(req.motion.cadence, 0);
   animator.setArmSpread(req.motion.arms, 0);
+  for (const side of ["L", "R"] as const) {
+    const target = req.motion.hands[side];
+    if (target) animator.setHandTarget(side, target, 0);
+  }
   if (req.motion.walking) animator.setWalking(true, 0);
   job = {
     id,
@@ -200,6 +204,7 @@ function motion(req: MotionRequest) {
   const t = j.solver.time;
   if (req.cadence !== undefined) j.animator.setCadence(req.cadence, t);
   if (req.arms !== undefined) j.animator.setArmSpread(req.arms, t);
+  if (req.hand) j.animator.setHandTarget(req.hand.side, req.hand.target, t);
   if (req.walk !== undefined) j.animator.setWalking(req.walk, t);
   if (req.turn) j.animator.startTurn(t);
   if (!j.running && j.animator.pending(t)) run(j).catch((err) => post({ type: "error", id: j.id, message: String(err) }));

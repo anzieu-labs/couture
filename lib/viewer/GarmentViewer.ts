@@ -5,8 +5,8 @@ import type { AnnyModel, BodyShape, LocalChanges, Phenotype } from "../avatar/an
 import { measureForPattern, type TorsoFrame } from "../avatar/bodyMeasures";
 import { loadAnnyModel } from "../avatar/loadAnny";
 import { measureBody, type BodyMeasurement } from "../avatar/measure";
-import { Animator, CADENCE, MOTION_DELAY, SETTLE_TIME } from "../avatar/motion";
-import { BONE_STRIDE, Skeleton, skinVertices } from "../avatar/skeleton";
+import { Animator, CADENCE, MOTION_DELAY, SETTLE_TIME, type Side } from "../avatar/motion";
+import { BONE_STRIDE, Skeleton, skinVertices, type Vec3 } from "../avatar/skeleton";
 import { GarmentSimulator } from "../garment/GarmentSimulator";
 import { MeshSlicer } from "../geometry/slice";
 import type { BodyMeasures, Pattern } from "../pattern/types";
@@ -21,6 +21,7 @@ import type { ClothModel } from "../sim/model";
 import { ClothShell } from "./ClothShell";
 import type { FitMode } from "./fitMap";
 import { GpuClothShell } from "./GpuClothShell";
+import { HandHandles } from "./HandHandles";
 import { FabricMaterial } from "./FabricMaterial";
 
 export type ViewPreset = "face" | "profil" | "dos" | "buste";
@@ -107,12 +108,15 @@ export class GarmentViewer {
   onSimProgress?: (progress: number) => void;
   /** Called when a garment starts simulating, with where it runs. */
   onSimBackend?: (backend: "gpu" | "cpu") => void;
+  /** Called when an arm is placed by hand or released (sides whose wrist has a target). */
+  onHandsChange?: (placed: Record<Side, boolean>) => void;
 
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly controls: OrbitControls;
   private readonly resizeObserver: ResizeObserver;
   private readonly figure = new THREE.Group();
+  private readonly handles: HandHandles;
   private readonly bodyGeo = new THREE.BufferGeometry();
   private readonly body: THREE.Mesh;
   private readonly fabric: FabricMaterial;
@@ -196,6 +200,8 @@ export class GarmentViewer {
     this.figure.add(this.body);
     this.scene.add(this.figure);
     this.setBody(anny.defaults());
+    this.handles = new HandHandles(this.camera, renderer.domElement, this.figure, this.controls);
+    this.handles.onDrag = (side, target) => this.setHandTarget(side, target);
 
     this.fabric = new FabricMaterial(renderer.getMaxAnisotropy());
     this.simulator = new GarmentSimulator({
@@ -280,6 +286,43 @@ export class GarmentViewer {
     if (this.garment?.cpu) this.simulator.motion({ arms: degrees });
   }
 
+  /**
+   * Places an arm by its wrist (body frame, m), by inverse kinematics; null gives it
+   * back to the arm spread. With a garment, applied once it is sewn.
+   */
+  setHandTarget(side: Side, target: Vec3 | null) {
+    this.animator.setHandTarget(side, target, this.clock);
+    if (this.garment?.cpu) this.simulator.motion({ hand: { side, target } });
+    const t = this.animator.handTargets;
+    this.onHandsChange?.({ L: !!t.L, R: !!t.R });
+  }
+
+  /** Both arms back to the arm spread. */
+  releaseHands() {
+    for (const side of ["L", "R"] as const) if (this.animator.handTargets[side]) this.setHandTarget(side, null);
+  }
+
+  /** Shows the wrist handles (Pose tab). */
+  setHandlesVisible(on: boolean) {
+    this.handles.setVisible(on);
+  }
+
+  /** Wrist positions (body frame) for the given bone transforms (null: rest pose). */
+  private wrists(bones: Float32Array | null): Record<Side, Vec3> {
+    const out = {} as Record<Side, Vec3>;
+    for (const side of ["L", "R"] as const) {
+      const [x, y, z] = this.skeleton.head(`wrist.${side}`);
+      const k = this.skeleton.index[`wrist.${side}`];
+      if (!bones || k === undefined) {
+        out[side] = [x, y, z];
+        continue;
+      }
+      const o = k * BONE_STRIDE;
+      out[side] = [0, 1, 2].map((r) => bones[o + 4 * r] * x + bones[o + 4 * r + 1] * y + bones[o + 4 * r + 2] * z + bones[o + 4 * r + 3]) as Vec3;
+    }
+    return out;
+  }
+
   /** Arm spread of the current morphology's rest pose (degrees from the body). */
   get restArmSpread(): number {
     return this.animator.restArmSpread;
@@ -340,7 +383,7 @@ export class GarmentViewer {
         skin: this.anny.skin,
         rig: { labels, parents },
       },
-      motion: { walking: this.walkWanted, cadence: this.cadence, arms: this.armSpread },
+      motion: { walking: this.walkWanted, cadence: this.cadence, arms: this.armSpread, hands: this.animator.handTargets },
     });
     this.onSimProgress?.(0);
   }
@@ -520,8 +563,9 @@ export class GarmentViewer {
     const gpu = garment?.gpu;
     if (gpu && (!gpu.done || this.animator.pending(this.clock))) this.stepGpuGarment(gpu, interval);
     else if (interval > 0) this.clock += Math.min(interval, 100) / 1000;
-    if (garment?.cpu) this.poseBody(this.cpuBones);
-    else this.poseBody(this.animator.sample(this.clock, this.bones) ? this.bones : null);
+    const bones = garment?.cpu ? this.cpuBones : this.animator.sample(this.clock, this.bones) ? this.bones : null;
+    this.poseBody(bones);
+    this.handles.update(this.wrists(bones));
     if (this.tween) {
       const { t0, from, to, targetFrom, targetTo } = this.tween;
       const k = Math.min(1, (time - t0) / 900);
@@ -588,6 +632,7 @@ export class GarmentViewer {
     this.controls.dispose();
     this.simulator.dispose();
     this.removeGarment();
+    this.handles.dispose();
     this.fitMaterial.dispose();
     this.fabric.dispose();
     this.scene.traverse((o) => {

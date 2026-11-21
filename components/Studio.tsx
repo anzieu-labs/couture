@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FEMALE, MALE } from "@/lib/avatar/morphology";
-import { CADENCE } from "@/lib/avatar/motion";
+import { CADENCE, DEFAULT_ARM_SPREAD } from "@/lib/avatar/motion";
 import type { ExportOptions } from "@/lib/pattern/export";
 import { DEFAULT_ALLOWANCES } from "@/lib/pattern/markings";
 import { TEXTILES, type Textile } from "@/lib/textiles/catalog";
@@ -55,7 +55,7 @@ export default function Studio() {
   const [autoRotate, setAutoRotate] = useState(false);
   const [walking, setWalking] = useState(false);
   const [cadence, setCadence] = useState(CADENCE.default);
-  const [armSpread, setArmSpread] = useState<number | null>(null);
+  const [armSpread, setArmSpread] = useState<number | null>(DEFAULT_ARM_SPREAD);
   const [fitMode, setFitMode] = useState<FitMode | null>(null);
   const [cutting, setCutting] = useState<ExportOptions>({ allowances: DEFAULT_ALLOWANCES, fold: true });
   const [editorOpen, setEditorOpen] = useState(false);
@@ -96,6 +96,20 @@ export default function Studio() {
   useEffect(() => {
     if (ready) viewerRef.current?.setArmSpread(armSpread);
   }, [ready, armSpread, viewerRef]);
+
+  // Wrist handles: shown in the Pose tab only; which arms are placed by hand.
+  const [handsPlaced, setHandsPlaced] = useState(false);
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!ready || !viewer) return;
+    viewer.onHandsChange = (placed) => setHandsPlaced(placed.L || placed.R);
+    return () => {
+      viewer.onHandsChange = undefined;
+    };
+  }, [ready, viewerRef]);
+  useEffect(() => {
+    if (ready) viewerRef.current?.setHandlesVisible(tab === "pose");
+  }, [ready, tab, viewerRef]);
 
   const turn = () => {
     setWalking(false);
@@ -260,12 +274,17 @@ export default function Studio() {
               armSpread={armSpread}
               // eslint-disable-next-line react-hooks/refs -- depends on the morphology, re-read on each render
               restArmSpread={viewerRef.current?.restArmSpread ?? 40}
-              onArmSpread={setArmSpread}
+              onArmSpread={(v) => {
+                viewerRef.current?.releaseHands();
+                setArmSpread(v);
+              }}
               cadence={cadence}
               onCadence={setCadence}
               walking={walking}
               onWalking={setWalking}
               onTurn={turn}
+              handsPlaced={handsPlaced}
+              onReleaseHands={() => viewerRef.current?.releaseHands()}
             />
           )}
           {tab === "patron" && (

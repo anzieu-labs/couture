@@ -108,7 +108,21 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   *Limites* : bras sous 20° (épaule écrasée par le skinning : c'est la peau qui pince la manche) ; une île plus grande que 15 % du
   vêtement n'est pas retournée (heuristique de Baraff : la petite région est la fautive) ; pour
   plusieurs vêtements, il faudra ordonner les couches (côté imposé entre vêtements).
-- [x] **Animation du mannequin** (onglet « Pose » + boutons Marche / Tour) : écartement des bras
+- [x] **Animation du mannequin** (onglet « Pose » + boutons Marche / Tour) : par défaut, une fois le
+  vêtement cousu, bras le long du corps (20°, `DEFAULT_ARM_SPREAD`) et coudes relâchés (jusqu'à 35°
+  d'extension quand les bras descendent : la pose de repos a les coudes pliés de 44°, avant-bras vers
+  l'avant) ; bouton « Repos » pour la pose de couture (bras en A). Le réglage « Proportions » d'Anny
+  n'est plus proposé (fixé à 0,5). **Mains placées à la souris** (onglet Pose : repère de translation
+  à trois axes sur chaque poignet, `lib/viewer/HandHandles.ts` — flèche = déplacement contraint à
+  l'axe, centre = libre face à la caméra ; axe vu de face masqué et non saisissable ; taille constante
+  à l'écran) : cinématique inverse à deux segments
+  (`lib/avatar/armIK.ts`, coude du côté où il est au repos, cibles hors d'atteinte ramenées à bras
+  tendu), bras indépendants, cible lissée (0,2 s) pour que la simulation suive ; remplace l'écartement
+  et le balancier de la marche pour ce bras ; « Libérer les mains », le curseur ou « Repos » rendent
+  les bras au réglage commun. Le vêtement est toujours cousu au repos, la pose s'applique ensuite.
+  *Limites* : main au-dessus de la tête ou derrière le dos = zone fragile de la collision en espace
+  repos (épaule).
+  Écartement des bras
   (20–70°), marche sur place en boucle (60–150 pas/min, foulée proportionnelle), un tour complet sur
   le socle. Le vêtement est toujours cousu dans la pose de repos (bras en A) ; la pose choisie
   s'applique après la couture (`MOTION_DELAY`). Collision « en espace repos » : chaque sommet du

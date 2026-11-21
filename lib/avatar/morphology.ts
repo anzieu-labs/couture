@@ -7,6 +7,7 @@ export interface Morphology {
   statureCm: number;
   weight: number;
   muscle: number;
+  /** Anny "proportions" parameter: not offered in the UI, kept at the neutral 0.5. */
   proportions: number;
   cupsize: number;
   firmness: number;
@@ -51,7 +52,6 @@ export const MORPHOLOGY_SLIDERS: SliderDef[] = [
   { key: "ageYears", label: "Âge", min: 18, max: 80, step: 1, format: (v) => `${v} ans` },
   { key: "weight", label: "Corpulence", min: 0, max: 1, step: 0.01, ends: ["Mince", "Moyenne", "Forte"] },
   { key: "muscle", label: "Musculature", min: 0, max: 1, step: 0.01, ends: ["Faible", "Moyenne", "Athlétique"] },
-  { key: "proportions", label: "Proportions", min: 0, max: 1, step: 0.01, ends: ["Classiques", "Moyennes", "Atypiques"] },
   { key: "cupsize", label: "Poitrine", min: 0, max: 1, step: 0.01, format: pct },
   { key: "firmness", label: "Fermeté", min: 0, max: 1, step: 0.01, format: pct },
 ];

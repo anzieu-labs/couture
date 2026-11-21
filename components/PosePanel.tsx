@@ -15,13 +15,18 @@ interface Props {
   walking: boolean;
   onWalking: (on: boolean) => void;
   onTurn: () => void;
+  /** Some arm is placed by its hand (3D handles). */
+  handsPlaced: boolean;
+  onReleaseHands: () => void;
 }
 
 const pill =
   "rounded-full border border-line bg-white/60 px-3 py-1 text-xs font-medium text-ink transition-colors hover:border-muted aria-pressed:border-ink aria-pressed:bg-ink aria-pressed:text-white";
 
 /** Mannequin pose and motions: arm spread, walk (with its cadence) and turn. */
-export function PosePanel({ armSpread, restArmSpread, onArmSpread, cadence, onCadence, walking, onWalking, onTurn }: Props) {
+export function PosePanel({
+  armSpread, restArmSpread, onArmSpread, cadence, onCadence, walking, onWalking, onTurn, handsPlaced, onReleaseHands,
+}: Props) {
   const arms = armSpread ?? Math.round(restArmSpread);
   return (
     <>
@@ -44,6 +49,18 @@ export function PosePanel({ armSpread, restArmSpread, onArmSpread, cadence, onCa
             Repos
           </button>
         </div>
+      </Section>
+
+      <Section title="Mains">
+        <p className="text-[11px] leading-relaxed text-muted">
+          Chaque poignet porte un repère à trois axes dans la vue 3D : une flèche déplace la main sur son axe (rouge :
+          côté, vert : hauteur, bleu : avant / arrière), le centre la déplace librement face à la caméra. Le bras suit,
+          le coude se place seul. Chaque bras est indépendant ; le curseur d&apos;écartement ou « Repos » les rend au
+          réglage commun.
+        </p>
+        <button type="button" className={`${pill} mt-3 disabled:opacity-40`} onClick={onReleaseHands} disabled={!handsPlaced}>
+          Libérer les mains
+        </button>
       </Section>
 
       <Section title="Mouvement">
