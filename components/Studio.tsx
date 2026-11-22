@@ -8,6 +8,7 @@ import type { P2 } from "@/lib/pattern/curves";
 import { constrain, withDelta } from "@/lib/pattern/edit";
 import type { ExportOptions } from "@/lib/pattern/export";
 import { DEFAULT_ALLOWANCES } from "@/lib/pattern/markings";
+import { GARMENTS } from "@/lib/pattern/garments";
 import type { PatternEdits } from "@/lib/pattern/types";
 import { CUSTOM_TEXTILE, customTextile, drapeOf, TEXTILE_FIELDS, TEXTILES, withLook, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
@@ -66,8 +67,9 @@ const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /**
  * The workshop as it was left — mannequin, textile, garment and its settings — kept in this
  * browser's local storage (no account) and found again when the page is opened: what the
- * assistant's conversation, kept the same way (hooks/useAssistant.ts), talks about. Not kept:
- * the pose, and a drawn pattern (the garment last worn from the catalogue is).
+ * assistant's conversation, kept the same way (hooks/useAssistant.ts), talks about. A saved
+ * pattern of the library being worn is taken up again (hooks/useLibrary.ts). Not kept: the
+ * pose, and a drawing that is not of the library (the garment last worn from the catalogue is).
  */
 const MEMORY = "couture.workshop.v1";
 const isNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -205,19 +207,19 @@ export default function Studio() {
   const remembered = useRef(false);
   const lastCatalogue = useRef(garment.kind);
   const { morph, targets, setMorph, setTargets } = body;
-  const { kind: garmentKind, allParams } = garment;
+  const { kind: garmentKind, allParams, savedId } = garment;
   useEffect(() => {
     if (garmentKind !== FREE) lastCatalogue.current = garmentKind;
     if (!remembered.current) return;
     const timer = setTimeout(() => {
       try {
-        localStorage.setItem(MEMORY, JSON.stringify({ morph, targets, textileId, custom, colorsById, garment: lastCatalogue.current, params: allParams }));
+        localStorage.setItem(MEMORY, JSON.stringify({ morph, targets, textileId, custom, colorsById, garment: lastCatalogue.current, params: allParams, saved: savedId }));
       } catch {
         // Storage full or refused: the workshop starts afresh next time.
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [morph, targets, textileId, custom, colorsById, garmentKind, allParams]);
+  }, [morph, targets, textileId, custom, colorsById, garmentKind, allParams, savedId]);
   const recall = useEffectEvent(() => {
     remembered.current = true;
     try {
@@ -240,7 +242,7 @@ export default function Studio() {
         );
       }
       if (kept.textileId === CUSTOM_TEXTILE || TEXTILES.some((t) => t.id === kept.textileId)) setTextileId(kept.textileId as string);
-      garment.restore(kept.garment, kept.params);
+      garment.restore(kept.garment, kept.params, kept.saved);
     } catch {
       // Unreadable: the workshop as it starts.
     }
@@ -336,9 +338,13 @@ export default function Studio() {
     },
     setGarment: (i) => ({ ...garment.wear(i.id, i.params ?? []), note: "le vêtement est recousu puis drapé en quelques secondes" }),
     drawGarment: async (i) => {
-      const drawn = await garment.describeFree(i.description);
-      return { name: drawn.name, note: drawn.note, pieces: drawn.free.pieces.length, seams: drawn.free.seams.length, stillWrong: drawn.issues };
+      // A model of the same kind exists (the assistant's choice, lib/assistant/tools.ts): it is adjusted, not drawn again.
+      const from = i.startFrom && garment.isModel(i.startFrom) ? i.startFrom : null;
+      const drawn = from ? await garment.reshape(i.description, from) : await garment.describeFree(i.description);
+      const startedFrom = from ? (garment.saved.find((p) => p.id === from)?.name ?? GARMENTS.find((g) => g.id === from)?.name) : undefined;
+      return { name: drawn.name, note: drawn.note, pieces: drawn.free.pieces.length, seams: drawn.free.seams.length, stillWrong: drawn.issues, savedToLibrary: true, ...(startedFrom && { startedFrom }) };
     },
+    wearSaved: (i) => ({ ...garment.wearSaved(i.id), note: "une copie de ce patron est portée : la retoucher l'enregistre comme variante" }),
     removePieces: (i) => ({ ...garment.removePieces(i.pieces), note: "le vêtement est maintenant un patron dessiné ; « Annuler » de l'éditeur 2D revient en arrière s'il l'était déjà" }),
     reshapeGarment: async (i) => {
       const drawn = await garment.reshape(i.change);
@@ -398,6 +404,7 @@ export default function Studio() {
         clasps: garment.clasps.map((c) => ({ a: `${c.a.piece}/${c.a.edge} t=${round(c.a.t, 2)}`, b: `${c.b.piece}/${c.b.edge} t=${round(c.b.t, 2)}` })),
         belts: garment.belts.map((b) => ({ edge: `${b.piece}/${b.edge}`, stretch: b.stretch })),
       },
+      library: garment.saved.slice(0, 40).map((p) => ({ id: p.id, name: p.name, note: p.note.slice(0, 120), ...(p.id === garment.savedId && { worn: true }) })),
       draping: simProgress > 0 && simProgress < 1,
     };
   };
@@ -613,6 +620,10 @@ export default function Studio() {
                 setEditorOpen(true);
                 return read;
               }}
+              saved={garment.saved}
+              savedId={garment.savedId}
+              onWearSaved={(id) => void garment.wearSaved(id)}
+              onForgetSaved={garment.forgetSaved}
               hasDrawing={garment.hasDrawing}
               canCopy={garment.canCopy}
               measures={garment.measures}

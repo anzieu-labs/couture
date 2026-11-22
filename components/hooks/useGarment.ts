@@ -14,6 +14,7 @@ import { NO_EDITS, type Belt, type BodyMeasures, type Clasp, type PatternEdits }
 import { patternIssues } from "@/lib/pattern/validate";
 import type { Textile } from "@/lib/textiles/catalog";
 import type { GarmentViewer } from "@/lib/viewer/GarmentViewer";
+import { useLibrary } from "./useLibrary";
 
 const DRESS_DELAY = 250;
 const HISTORY = 100;
@@ -85,7 +86,7 @@ function useEditHistory(kind: string) {
     () => update((s) => (s.future.length ? { past: [...s.past, s.present], present: s.future[0], future: s.future.slice(1) } : s)),
     [update],
   );
-  return { edits: h.present.edits, clasps: h.present.clasps, belts: h.present.belts, free: h.present.free, drawing: all[FREE]?.present.free, commit, commitClasps, commitBelts, commitFree, commitDrawing, restart, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
+  return { edits: h.present.edits, clasps: h.present.clasps, belts: h.present.belts, free: h.present.free, drawing: all[FREE]?.present.free, drawingClasps: all[FREE]?.present.clasps ?? NO_CLASPS, drawingBelts: all[FREE]?.present.belts ?? NO_BELTS, commit, commitClasps, commitBelts, commitFree, commitDrawing, restart, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
 }
 
 /** Pattern drafted from the measured body (+ edits), then sewn & draped with the textile's mechanics. */
@@ -101,21 +102,39 @@ export function useGarment(
   const history = useEditHistory(kind);
   // The user's own drawing as a garment: drafted from the drawing, not from the body.
   const drawing = history.drawing;
+  // The saved pattern (hooks/useLibrary.ts) the drawing is: `own`, the one it is saved to as it
+  // changes; else a copy of it being worn, whose first change is saved as a variant.
+  const library = useLibrary();
+  const [entry, setEntry] = useState<{ id: string; own: boolean } | null>(null);
+  const saved = entry ? library.patterns.find((p) => p.id === entry.id) : undefined;
+  const { drawingClasps, drawingBelts } = history;
+  const { add: saveNew, update: saveOver } = library;
+  useEffect(() => {
+    if (!entry || !saved || !drawing) return;
+    if (saved.free === drawing && saved.clasps === drawingClasps && saved.belts === drawingBelts) return;
+    const timer = setTimeout(() => {
+      // The library holds the history's very arrays: that is how a drawing is told unchanged, above.
+      const now = { free: drawing, clasps: drawingClasps as Clasp[], belts: drawingBelts as Belt[] };
+      if (entry.own) saveOver(entry.id, now);
+      else setEntry({ id: saveNew({ name: `${saved.name} · variante`, note: saved.note, ...now }), own: true });
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [entry, saved, drawing, drawingClasps, drawingBelts, saveNew, saveOver]);
   const freeDef = useMemo(
     (): GarmentDef => ({
       id: FREE,
       style: FREE,
       cut: "homme",
       kind: "tshirt",
-      name: "Patron libre",
+      name: saved?.name ?? "Patron libre",
       short: "Libre",
-      description: "Dessiné à la main : pièces, points, coutures.",
+      description: saved?.note || "Dessiné à la main : pièces, points, coutures.",
       image: "",
       params: [],
       defaults: NO_PARAMS,
       draft: (_m, _p, edits) => draftFree(drawing ?? NO_DRAWING, edits),
     }),
-    [drawing],
+    [drawing, saved?.name, saved?.note],
   );
   const garment = kind === FREE ? freeDef : garmentDef(kind);
   const params = allParams[kind] ?? NO_PARAMS;
@@ -176,6 +195,7 @@ export function useGarment(
       belts: copy ? history.belts : NO_BELTS,
       free: copy ? copyFree(worn, measures) : simpleFree(measures),
     });
+    setEntry(null);
     setKind(FREE);
   };
   /**
@@ -186,6 +206,7 @@ export function useGarment(
     if (!measures) throw new Error("Le mannequin n'est pas encore prêt.");
     const read = importDxf(text, units, measures);
     history.restart(FREE, { edits: NO_EDITS, clasps: NO_CLASPS, belts: NO_BELTS, free: read.free });
+    setEntry(null);
     setKind(FREE);
     return read;
   };
@@ -196,30 +217,61 @@ export function useGarment(
    */
   const askPattern = async (request: object): Promise<DescribedPattern> => {
     const response = await fetch("/api/pattern", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) }).catch(() => null);
-    const drawn = (await response?.json().catch(() => null)) as (DescribedPattern & { error?: string }) | null;
-    if (!response?.ok || !drawn?.free) throw new Error(drawn?.error ?? "Le service de dessin n'a pas répondu. Réessayez dans un instant.");
+    // The answer takes up to a minute and a half to come: a connection cut meanwhile (the page or
+    // the server reloaded, the network lost) is not the service failing — told apart, to be asked again.
+    if (!response) throw new Error("La connexion a été coupée avant la réponse du service de dessin (page ou serveur rechargé, réseau perdu). Le vêtement n'a pas changé : renvoyez la demande.");
+    const drawn = (await response.json().catch(() => null)) as (DescribedPattern & { error?: string }) | null;
+    if (!response.ok || !drawn?.free) throw new Error(drawn?.error ?? "Le service de dessin n'a pas répondu. Réessayez dans un instant.");
     return drawn;
   };
   const describeFree = async (description: string): Promise<DescribedPattern> => {
     if (!measures) throw new Error("Le mannequin n'est pas encore prêt.");
     const drawn = await askPattern({ description, measures });
-    history.restart(FREE, { edits: NO_EDITS, clasps: drawn.clasps ?? NO_CLASPS, belts: drawn.belts ?? NO_BELTS, free: drawn.free });
+    const clasps = drawn.clasps ?? [], belts = drawn.belts ?? [];
+    history.restart(FREE, { edits: NO_EDITS, clasps, belts, free: drawn.free });
+    // A new model: kept in the library, to be worn again.
+    setEntry({ id: saveNew({ name: drawn.name, note: drawn.note, free: drawn.free, clasps, belts }), own: true });
     setKind(FREE);
     return drawn;
+  };
+  /** A pattern of the library worn: a copy of it (`own`: the pattern itself, taken up where it was left). */
+  const wearSaved = (id: string, own = false) => {
+    const kept = library.patterns.find((p) => p.id === id);
+    if (!kept) throw new Error("Ce patron n'est plus dans la bibliothèque.");
+    history.restart(FREE, { edits: NO_EDITS, clasps: kept.clasps, belts: kept.belts, free: kept.free });
+    setEntry({ id, own });
+    setKind(FREE);
+    return { name: kept.name, note: kept.note, pieces: kept.free.pieces.map((p) => p.name) };
+  };
+  const forgetSaved = (id: string) => {
+    if (entry?.id === id) setEntry(null);
+    library.remove(id);
   };
 
   // ---- The garment worn, changed (the assistant's retouches): whatever it is, it is changed as
   // a drawing — its own when it is one (a step to undo), a copy of it when it is of the catalogue.
-  type Worn = { free: FreePattern; clasps: readonly Clasp[]; belts: readonly Belt[]; own: boolean };
+  type Worn = { free: FreePattern; clasps: readonly Clasp[]; belts: readonly Belt[]; own: boolean; name: string };
+  /** A model to start from, told by its id: a saved pattern of the library, or a garment of the catalogue as it is set — as a drawing, whatever is being worn. */
+  const modelDrawing = (id: string): Worn | null => {
+    if (!measures) throw new Error("Le mannequin n'est pas encore prêt.");
+    const kept = library.patterns.find((p) => p.id === id);
+    if (kept) return { free: kept.free, clasps: kept.clasps, belts: kept.belts, own: false, name: `${kept.name} · variante` };
+    const def = GARMENTS.find((g) => g.id === id);
+    if (!def) return null;
+    return { free: copyFree(def.draft(measures, allParams[id] ?? def.defaults, NO_EDITS), measures), clasps: def.clasps ?? NO_CLASPS, belts: def.belts ?? NO_BELTS, own: false, name: `${def.name} retouché` };
+  };
   const wornDrawing = (): Worn => {
     if (!measures) throw new Error("Le mannequin n'est pas encore prêt.");
-    if (kind !== FREE) return { free: copyFree(garment.draft(measures, params, history.edits), measures), clasps: history.clasps, belts: history.belts, own: false };
+    if (kind !== FREE) return { free: copyFree(garment.draft(measures, params, history.edits), measures), clasps: history.clasps, belts: history.belts, own: false, name: `${garment.name} retouché` };
     if (!drawing) throw new Error("Il n'y a pas de patron à retoucher.");
-    return { free: drawing, clasps: history.clasps, belts: history.belts, own: true };
+    return { free: drawing, clasps: history.clasps, belts: history.belts, own: true, name: garment.name };
   };
-  const putOn = (worn: Worn, free: FreePattern, clasps: readonly Clasp[], belts: readonly Belt[]) => {
+  const putOn = (worn: Worn, free: FreePattern, clasps: readonly Clasp[], belts: readonly Belt[], note: string) => {
     if (worn.own) return history.commitDrawing(free, clasps, belts);
-    history.restart(FREE, { edits: NO_EDITS, clasps, belts, free });
+    // A garment of the catalogue retouched: a drawing from now on, kept in the library under its name.
+    const own = { clasps: [...clasps], belts: [...belts] };
+    history.restart(FREE, { edits: NO_EDITS, ...own, free });
+    setEntry({ id: saveNew({ name: worn.name, note, free, ...own }), own: true });
     setKind(FREE);
   };
   /** Pieces taken off the garment worn, told by their id or their name, with their seams and what was fastened to them. */
@@ -232,7 +284,7 @@ export function useGarment(
     if (gone.length === worn.free.pieces.length) throw new Error("Un vêtement garde au moins une pièce.");
     const off = new Set(gone.map((p) => p.id));
     const free = { ...worn.free, pieces: worn.free.pieces.filter((p) => !off.has(p.id)), seams: worn.free.seams.filter((s) => !off.has(s.a.piece) && !off.has(s.b.piece)) };
-    putOn(worn, free, worn.clasps.filter((c) => !off.has(c.a.piece) && !off.has(c.b.piece)), worn.belts.filter((b) => !off.has(b.piece)));
+    putOn(worn, free, worn.clasps.filter((c) => !off.has(c.a.piece) && !off.has(c.b.piece)), worn.belts.filter((b) => !off.has(b.piece)), `${garment.name}, sans ${[...new Set(names(gone).map((n) => n.replace(/ \d+$/, "").toLowerCase()))].join(" ni ")}.`);
     return { removed: names(gone), left: names(free.pieces) };
   };
   // ---- Accessories put on by the assistant: as the 2D editor's tools do, told by edges.
@@ -268,9 +320,10 @@ export function useGarment(
    * `base`). What the model gives back unchanged is kept as it was drawn here — its curves to
    * the point, the way its seams were sewn — and not as the model retold it.
    */
-  const reshape = async (change: string): Promise<DescribedPattern> => {
-    const worn = wornDrawing();
-    const drawn = await askPattern({ description: change, measures, base: sketchOf(worn.free, worn.belts, worn.clasps, garment.name, "") });
+  const reshape = async (change: string, from?: string): Promise<DescribedPattern> => {
+    // `from`: another model than the garment worn to start from (modelDrawing) — the result is then a new pattern of the library.
+    const worn = (from !== undefined && modelDrawing(from)) || wornDrawing();
+    const drawn = await askPattern({ description: change, measures, base: sketchOf(worn.free, worn.belts, worn.clasps, worn.name, "") });
     const kept = new Set(drawn.unchanged ?? []);
     const sides = (s: FreePattern["seams"][number]) => [`${s.a.piece}/${s.a.edge}`, `${s.b.piece}/${s.b.edge}`].sort().join(" ");
     const sewn = new Map(worn.free.seams.map((s) => [sides(s), s.reverse]));
@@ -279,7 +332,8 @@ export function useGarment(
       pieces: drawn.free.pieces.map((p) => (kept.has(p.id) && worn.free.pieces.find((w) => w.id === p.id)) || p),
       seams: drawn.free.seams.map((s) => (kept.has(s.a.piece) && kept.has(s.b.piece) && sewn.has(sides(s)) ? { ...s, reverse: sewn.get(sides(s))! } : s)),
     };
-    putOn(worn, free, drawn.clasps ?? NO_CLASPS, drawn.belts ?? NO_BELTS);
+    // Started from another model: a garment of its own, under the name the pattern maker gave it.
+    putOn(from !== undefined && drawn.name ? { ...worn, name: drawn.name } : worn, free, drawn.clasps ?? NO_CLASPS, drawn.belts ?? NO_BELTS, drawn.note);
     return { ...drawn, free };
   };
   /**
@@ -305,7 +359,7 @@ export function useGarment(
     return { name: def.name, cut: def.cut, params: next };
   };
   /** The garment worn and the settings of every garment as they were left (Studio's memory): what is not of the catalogue any more is left out. */
-  const restore = (id: unknown, settings: unknown) => {
+  const restore = (id: unknown, settings: unknown, savedId?: unknown) => {
     if (settings && typeof settings === "object") {
       const kept: Record<string, GarmentParams> = {};
       for (const g of GARMENTS) {
@@ -320,6 +374,8 @@ export function useGarment(
       setAllParams((a) => ({ ...a, ...kept }));
     }
     if (GARMENTS.some((g) => g.id === id)) setKind(id as string);
+    // The saved pattern that was being worn, taken up where it was left.
+    if (typeof savedId === "string" && library.patterns.some((p) => p.id === savedId)) wearSaved(savedId, true);
   };
   const { commit: commitEdits, commitFree } = history;
   // A drawn pattern has no edits: the points moved are moved in the drawing.
@@ -348,6 +404,13 @@ export function useGarment(
     wear,
     removePieces,
     reshape,
+    /** The library of saved patterns, the one being worn (null: none), and how to wear or forget one. */
+    saved: library.patterns,
+    savedId: kind === FREE ? (entry?.id ?? null) : null,
+    wearSaved,
+    forgetSaved,
+    /** Whether an id is a model one can start from: a saved pattern or a garment of the catalogue. */
+    isModel: (id: string) => library.patterns.some((p) => p.id === id) || GARMENTS.some((g) => g.id === id),
     addClasp,
     addBelt,
     removeAccessories,

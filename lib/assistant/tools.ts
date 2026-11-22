@@ -60,7 +60,8 @@ export const assistantInputs = {
     id: z.enum(GARMENT_IDS).optional(),
     params: z.array(z.object({ key: z.string(), value: z.number() })).optional(),
   }),
-  drawGarment: z.object({ description: z.string().min(3).max(DESCRIPTION_MAX) }),
+  drawGarment: z.object({ description: z.string().min(3).max(DESCRIPTION_MAX), startFrom: z.string().nullable() }),
+  wearSaved: z.object({ id: z.string() }),
   removePieces: z.object({ pieces: z.array(z.string()).min(1) }),
   reshapeGarment: z.object({ change: z.string().min(3).max(DESCRIPTION_MAX) }),
   addClasp: z.object({
@@ -118,8 +119,13 @@ export const assistantTools = {
   },
   drawGarment: {
     description:
-      "Have a new garment drawn from a description (a pattern maker model draws its pieces and sews them; it takes 30 to 90 seconds). For garments the catalogue does not have, or a shape its settings cannot reach. Pass the description in the user's words, completed with what they said earlier.",
+      "Have a garment the user asks for drawn (a pattern maker model draws its pieces and sews them; 30 to 90 seconds), and saved to the user's library. `description`: the garment, in the user's words, completed with what they said earlier. `startFrom` is a decision you must make each time: the id of the model the drawing starts from — the saved pattern (state.library) or the catalogue garment that is the same kind of garment as the one asked (a poncho for a poncho, a dress for a dress, a hooded top for a hooded top) — so that it is adjusted instead of being drawn again from nothing; null only when no saved pattern and no catalogue garment is of that kind. A saved pattern of that kind comes before a catalogue garment.",
     inputSchema: assistantInputs.drawGarment,
+  },
+  wearSaved: {
+    description:
+      "Wear one of the user's saved patterns (state.library: the garments drawn for them earlier, by id). A copy of it is worn; what is changed on it afterwards is saved as a variant, the saved pattern itself stays as it was.",
+    inputSchema: assistantInputs.wearSaved,
   },
   removePieces: {
     description:
@@ -170,6 +176,8 @@ export interface AssistantState {
     clasps: { a: string; b: string }[];
     belts: { edge: string; stretch: number }[];
   };
+  /** The user's saved patterns (the garments drawn for them earlier), the latest first. */
+  library: { id: string; name: string; note: string; worn?: boolean }[];
   /** Whether the garment is still being sewn and draped. */
   draping: boolean;
 }
@@ -191,6 +199,7 @@ How to work:
 - Do not ask for permission, and only ask a question when the request cannot be acted on.
 - "Bigger", "thinner", "more muscular" are relative to the current state below: change the values by a visible step (stature by what they say or 5 cm, weight or muscle by 0.15 to 0.25).
 - Only claim what a tool result confirms. If a tool reports an error or a limit reached, say so plainly.
+- Reuse before drawing. When the user asks for a garment, first look at the catalogue below and at their saved patterns (state.library). If one of them is exactly the garment asked, wear it (setGarment, wearSaved) and set what its settings allow. If one is the same kind of garment and only differs by a length, a fit, a neckline, a detail, a piece, it is not drawn again from nothing: drawGarment with its id as "startFrom" adjusts it. Say which model you started from. A garment is drawn from nothing (startFrom null) only when nothing of its kind exists. A request that goes on with the garment worn ("longer", "take the hood off") changes it as it is; a request for another garment that happens to be close to a saved pattern starts from a copy of it — call wearSaved first, even when that pattern is the one worn (state.library, "worn"): the saved one is kept, and what you make of the copy is saved as a variant.
 - To change the garment being worn — "remove the hood", "longer sleeves", "make it flared" — act on it as it is: a setting if it is of the catalogue and has one for that, else removePieces or reshapeGarment. Do not draw a new garment (drawGarment) when the user is talking about the one they wear: their work on it would be lost.
 - Accessories: you put clasps and belts on with addClasp and addBelt, reading the pieces and edges of the garment worn in the state below, and take them off with removeAccessories.
 - What you cannot set: a single point of the pattern or a seam by hand (the 2D pattern editor does that), trousers (the mannequin's garments cover the trunk, the arms, the head and, as one tube, the legs). Say so rather than pretend.
@@ -267,8 +276,13 @@ export function callLabel(tool: string, input: unknown, output?: unknown): strin
       const def = GARMENTS.find((g) => g.id === i?.id);
       return list([def && `${def.name.toLowerCase()} (${def.cut})`, ...(i?.params ?? []).map((p) => setting(p.key, p.value))], "Vêtement");
     }
-    case "drawGarment":
-      return `dessin : ${read("drawGarment")?.description ?? "…"}`;
+    case "drawGarment": {
+      const i = read("drawGarment");
+      const from = typeof (output as { startedFrom?: unknown } | undefined)?.startedFrom === "string" ? (output as { startedFrom: string }).startedFrom : null;
+      return `${from ? `d'après « ${from} »` : "dessin"} : ${i?.description ?? "…"}`;
+    }
+    case "wearSaved":
+      return `patron de la bibliothèque${typeof (output as { name?: unknown } | undefined)?.name === "string" ? ` : ${(output as { name: string }).name}` : ""}`;
     case "removePieces": {
       // The pieces by their names, once known: the model tells them by their ids.
       const removed = (output as { removed?: unknown } | undefined)?.removed;

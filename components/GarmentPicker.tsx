@@ -1,9 +1,13 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { draftFree, type FreePattern } from "@/lib/pattern/free";
 import { CUT_LABELS, CUTS, garmentDef, garmentId, garmentsOf, type Cut } from "@/lib/pattern/garments";
 import type { DxfUnits } from "@/lib/pattern/import/dxf";
+import { NO_EDITS } from "@/lib/pattern/types";
+import { outline } from "@/lib/pattern/validate";
+import { searchable, type SavedPattern } from "./hooks/useLibrary";
 
 /** Thumbnail size (tools/thumbnails captures them at this ratio). */
 const THUMB = { w: 480, h: 640 };
@@ -17,6 +21,11 @@ interface Props {
   onDraw: (source: "simple" | "copy") => void;
   /** A pattern of the user's own is read from a DXF file (AAMA / ASTM); throws, with a message for the user, when it cannot be. */
   onImport: (text: string, units: DxfUnits) => void;
+  /** The user's saved patterns (hooks/useLibrary.ts: what the assistant drew for them), the one being worn, and how to wear or forget one. */
+  saved: readonly SavedPattern[];
+  savedId: string | null;
+  onWearSaved: (id: string) => void;
+  onForgetSaved: (id: string) => void;
   /** There is a drawing already (it can be taken up again); the garment worn can be copied into one. */
   hasDrawing: boolean;
   canCopy: boolean;
@@ -32,9 +41,37 @@ const DRAWING = "free";
  * one cut at a time; a switch in the header goes from the men's cuts to the women's. A native
  * modal dialog (focus kept inside, Escape closes); a click outside the cards closes it too.
  */
+/** The pieces of a drawing side by side, as they are drawn: the points of their outlines, and the room they take (cm). */
+function thumbOf(free: FreePattern) {
+  const gap = 6;
+  const pieces: { id: string; points: string }[] = [];
+  let x = 0, height = 1;
+  for (const piece of draftFree(free, NO_EDITS).pieces) {
+    const pts = outline(piece);
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+    const left = Math.min(...xs), top = Math.max(...ys);
+    pieces.push({ id: piece.id, points: pts.map(([px, py]) => `${(x + px - left).toFixed(1)},${(top - py).toFixed(1)}`).join(" ") });
+    x += Math.max(...xs) - left + gap;
+    height = Math.max(height, top - Math.min(...ys));
+  }
+  return { pieces, width: Math.max(1, x - gap), height };
+}
+
+/** A saved pattern as its card shows it. */
+function PatternThumb({ pattern }: { pattern: SavedPattern }) {
+  const drawn = useMemo(() => thumbOf(pattern.free), [pattern.free]);
+  return (
+    <svg viewBox={`-4 -4 ${drawn.width + 8} ${drawn.height + 8}`} className="size-full p-3" preserveAspectRatio="xMidYMid meet" aria-hidden>
+      {drawn.pieces.map((piece) => (
+        <polygon key={piece.id} points={piece.points} fill="white" stroke="var(--color-ink)" strokeWidth={Math.max(drawn.width, drawn.height) / 160} strokeLinejoin="round" />
+      ))}
+    </svg>
+  );
+}
+
 const UNITS: Record<DxfUnits, string> = { auto: "Unités : auto", mm: "mm", cm: "cm", in: "pouces" };
 
-export function GarmentPicker({ open, current, onSelect, onDraw, onImport, hasDrawing, canCopy, onClose }: Props) {
+export function GarmentPicker({ open, current, onSelect, onDraw, onImport, saved, savedId, onWearSaved, onForgetSaved, hasDrawing, canCopy, onClose }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   const [units, setUnits] = useState<DxfUnits>("auto");
   const [importError, setImportError] = useState<string | null>(null);
@@ -53,6 +90,12 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, hasDr
   const [shown, setShown] = useState<{ cut: Cut; forOpen: boolean }>({ cut: worn?.cut ?? "homme", forOpen: open });
   if (shown.forOpen !== open) setShown({ cut: worn?.cut ?? shown.cut, forOpen: open });
   const cut = shown.cut;
+  // Search: the garments of the catalogue (in the cut shown) and the saved patterns whose name or description has every word typed.
+  const [query, setQuery] = useState("");
+  const words = searchable(query).split(/\s+/).filter(Boolean);
+  const matches = (...texts: string[]) => words.every((w) => texts.some((t) => searchable(t).includes(w)));
+  const catalogue = garmentsOf(cut).filter((g) => matches(g.name, g.description, g.short));
+  const mine = saved.filter((p) => matches(p.name, p.note));
 
   useEffect(() => {
     const d = ref.current;
@@ -79,6 +122,14 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, hasDr
             </h2>
             <p className="mt-0.5 text-xs text-muted">Tracé sur les mesures du mannequin, puis cousu et drapé en 3D.</p>
           </div>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Rechercher un vêtement…"
+            aria-label="Rechercher un vêtement"
+            className="w-full rounded-full border border-line bg-white/80 px-3.5 py-1.5 text-xs outline-none placeholder:text-muted focus:border-ink sm:w-56"
+          />
           <div className="inline-flex gap-1 rounded-full border border-line bg-white/60 p-1" role="group" aria-label="Coupe">
             {CUTS.map((c) => (
               <button
@@ -168,8 +219,55 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, hasDr
           {hasDrawing && <p className="mt-2 text-[10.5px] text-muted">Un nouveau départ remplace le patron déjà dessiné.</p>}
         </section>
 
+        {/* The user's own patterns: what the assistant drew for them, kept in this browser. */}
+        {mine.length > 0 && (
+          <section className="mb-5" aria-labelledby="garment-picker-saved">
+            <h3 id="garment-picker-saved" className="mb-2 text-sm font-semibold">
+              Mes patrons <span className="font-normal text-muted">· dessinés par l&apos;assistant, gardés dans ce navigateur</span>
+            </h3>
+            <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+              {mine.map((p) => {
+                const worn = p.id === savedId && current === DRAWING;
+                return (
+                  <li key={p.id} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => onWearSaved(p.id)}
+                      aria-pressed={worn}
+                      title={p.note}
+                      className="group flex h-full w-full flex-col overflow-hidden rounded-xl border border-line bg-panel text-left shadow-sm transition hover:-translate-y-0.5 hover:border-ink hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink aria-pressed:border-ink aria-pressed:ring-1 aria-pressed:ring-ink"
+                    >
+                      <div className="relative aspect-[3/4] w-full overflow-hidden bg-canvas">
+                        <PatternThumb pattern={p} />
+                        {worn && <span className="absolute left-2 top-2 rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium text-white">Actuel</span>}
+                      </div>
+                      <div className="px-2.5 py-2">
+                        <p className="truncate text-[13px] font-semibold leading-tight">{p.name}</p>
+                        <p className="mt-0.5 line-clamp-2 text-[10.5px] leading-snug text-muted">{p.note || `${p.free.pieces.length} pièces`}</p>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onForgetSaved(p.id)}
+                      aria-label={`Supprimer le patron « ${p.name} »`}
+                      title="Supprimer ce patron de la bibliothèque"
+                      className="absolute right-1.5 top-1.5 grid size-6 place-items-center rounded-full border border-line bg-white/90 text-xs text-muted transition-colors hover:border-[#b2442f] hover:text-[#b2442f]"
+                    >
+                      ×
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
+
+        {mine.length > 0 && catalogue.length > 0 && <h3 className="mb-2 text-sm font-semibold">Catalogue</h3>}
+        {words.length > 0 && !mine.length && !catalogue.length && (
+          <p className="rounded-xl border border-line bg-panel p-4 text-xs text-muted">Aucun vêtement ne correspond à « {query.trim()} ». Demandez-le à l&apos;assistant : il le dessinera et il sera gardé ici.</p>
+        )}
         <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-          {garmentsOf(cut).map((g) => {
+          {catalogue.map((g) => {
             const selected = g.id === current;
             // The same style in the other cut is worn: this card switches the cut.
             const twin = !selected && !!worn && g.id === garmentId(worn.style, cut);

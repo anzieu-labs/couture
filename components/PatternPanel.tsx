@@ -9,6 +9,7 @@ import { CUT_LABELS, type GarmentDef, type GarmentParams } from "@/lib/pattern/g
 import type { DxfImport, DxfUnits } from "@/lib/pattern/import/dxf";
 import type { BodyMeasures, Pattern } from "@/lib/pattern/types";
 import { GarmentPicker } from "./GarmentPicker";
+import type { SavedPattern } from "./hooks/useLibrary";
 import { RangeField } from "./RangeField";
 import { seamColor, seamLegend } from "./seamColors";
 import { Section } from "./Section";
@@ -22,6 +23,11 @@ interface Props {
   /** A pattern of the user's own is read from a DXF file and worn; throws when it cannot be read. */
   onImport: (text: string, units: DxfUnits) => DxfImport;
   /** There is a drawing already; the garment worn can be copied into one. */
+  /** The saved patterns of the library (hooks/useLibrary.ts), for the garment picker. */
+  saved: readonly SavedPattern[];
+  savedId: string | null;
+  onWearSaved: (id: string) => void;
+  onForgetSaved: (id: string) => void;
   hasDrawing: boolean;
   canCopy: boolean;
   params: GarmentParams;
@@ -162,7 +168,7 @@ function ExportSection({ pattern, cutting, onCutting }: { pattern: Pattern | nul
 }
 
 export function PatternPanel({
-  pattern, garment, onGarment, onDraw, onImport, hasDrawing, canCopy, params, onParams, measures, progress, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
+  pattern, garment, onGarment, onDraw, onImport, saved, savedId, onWearSaved, onForgetSaved, hasDrawing, canCopy, params, onParams, measures, progress, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
 }: Props) {
   const simulating = progress > 0 && progress < 1;
   const [picking, setPicking] = useState(false);
@@ -216,6 +222,14 @@ export function PatternPanel({
             setImported({ read: onImport(text, units), garment: "free" });
             setPicking(false);
           }}
+          saved={saved}
+          savedId={savedId}
+          onWearSaved={(id) => {
+            onWearSaved(id);
+            setPicking(false);
+            setImported(null);
+          }}
+          onForgetSaved={onForgetSaved}
           hasDrawing={hasDrawing}
           canCopy={canCopy}
           onClose={() => setPicking(false)}

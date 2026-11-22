@@ -270,6 +270,32 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   d'un logiciel du commerce n'a été essayé, seulement nos exports et des fichiers écrits à la main.
   *À faire* : proposer des coutures d'après les longueurs de bords et les crans ; export du
   patron libre vers ces mêmes formats (il passe déjà par l'export existant).
+- [x] **Bibliothèque de patrons** (2026-11-22, `components/hooks/useLibrary.ts`) : ce que
+  l'assistant dessine est gardé — nom, note, dessin, fermoirs, ceintures — dans le
+  `localStorage` du navigateur (`couture.library.v1`, 60 patrons), sans compte, et se retrouve
+  dans le sélecteur de vêtement, section « Mes patrons » (vignette du patron à plat, suppression
+  par patron), au-dessus du catalogue. Le sélecteur a une **recherche** (nom et description,
+  sans tenir compte des accents ni de la casse ; catalogue de la coupe affichée et patrons
+  gardés). Porter un patron gardé en donne une copie ; la retoucher enregistre une variante,
+  le patron gardé reste ce qu'il était. Un patron qu'on vient de faire dessiner, lui, suit ses
+  retouches (c'est le travail en cours), et il est repris tel quel au rechargement de la page
+  — ce qui garde enfin un patron dessiné d'une session à l'autre. Un vêtement du catalogue
+  retouché par l'assistant (pièce retirée, retouche libre) entre aussi dans la bibliothèque.
+  **Ne pas redessiner ce qui existe** : la page dit à l'assistant les patrons gardés ; son
+  outil de dessin exige de dire de quel modèle partir (`startFrom` : un patron gardé ou un
+  vêtement du catalogue du même genre, ou rien) et, s'il y en a un, la page ne fait pas
+  dessiner à neuf : elle envoie ce modèle au modèle de dessin avec la demande comme retouche.
+  Une simple consigne dans le prompt n'a pas suffi (Gemini 2.5 Flash redessinait un « poncho à
+  capuche » alors qu'un poncho existait) ; le champ obligatoire de l'outil, si.
+  Vérifié dans l'app : « dessine-moi un poncho court à col bateau » → dessiné en 26 s, rangé
+  dans « Mes patrons », porté de nouveau après rechargement ; recherche « poncho » → 1 patron,
+  « capé » → cape et pèlerine, « zzz » → message vide ; « dessine-moi un poncho long,
+  jusqu'aux genoux » → fait d'après un poncho gardé, 22 s, enregistré à part, les deux
+  premiers inchangés.
+  *Limites* : un patron gardé est dessiné en centimètres pour le corps d'alors — porté sur une
+  autre morphologie, il garde ses tailles ; la bibliothèque est propre à ce navigateur (pas de
+  partage, pas d'export) ; le choix du modèle de départ est celui de l'assistant (il a pris le
+  poncho à capuche plutôt que le poncho simple) ; pas de renommage d'un patron gardé.
 - [x] **Assistant** (2026-11-22, `lib/assistant/tools.ts`, `app/api/assistant/route.ts`,
   `components/AssistantPanel.tsx`, `components/hooks/useAssistant.ts`) : une conversation gardée
   ouverte à droite de la vue 3D (repliable ; sur téléphone, un bouton l'ouvre par-dessus), avec
