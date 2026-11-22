@@ -4,6 +4,8 @@ import { BONE_STRIDE, Skeleton } from "../avatar/skeleton";
 import { CpuClothSolver } from "../sim/cloth";
 import { GRAB, selectGrab } from "../sim/grab";
 import { type ClothModel, type ClothParams, restDeadline, RestDetector, SELF_DELAY, tensileModuli } from "../sim/model";
+import type { BodySdf } from "../sim/bodySdf";
+import { bindTethers } from "../sim/tether";
 import { findTangles } from "../sim/untangle";
 import { prepareGarment } from "./prepare";
 import type { DressRequest, GarmentGeometry, GrabRequest, MotionRequest, WorkerRequest, WorkerResponse } from "./protocol";
@@ -44,7 +46,7 @@ interface Job {
 let current = 0;
 let job: Job | null = null;
 /** "gpu" mode: the model simulated on the main thread (for the intersection analyses). */
-let gpuModel: { id: number; model: ClothModel } | null = null;
+let gpuModel: { id: number; model: ClothModel; sdf: BodySdf } | null = null;
 const post = (msg: WorkerResponse, transfer: Transferable[] = []) => ctx.postMessage(msg, transfer);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -66,7 +68,7 @@ async function dress(req: DressRequest) {
   };
   if (mode === "gpu") {
     const grid = { data: sdf.data, skin: sdf.skin, nx: sdf.nx, ny: sdf.ny, nz: sdf.nz, min: sdf.min, h: sdf.h, limbs: sdf.limbs };
-    gpuModel = { id, model };
+    gpuModel = { id, model, sdf };
     post({ type: "model", id, model, sdf: grid, ...geometry });
     return;
   }
@@ -116,6 +118,8 @@ async function run(j: Job) {
     do {
       const realTime = animator.moving(solver.time) || j.holding || solver.time < j.liveUntil;
       if (realTime && lag < FRAME_DT) break;
+      // Motion mode (sim/tether.ts): held by its tethers while the body runs.
+      solver.tethered = solver.bound && animator.running(solver.time);
       solver.step(FRAME_DT, poseAt);
       if (realTime) lag -= FRAME_DT;
       frames++;
@@ -134,6 +138,8 @@ async function run(j: Job) {
     const armed = t > j.model.fastenedAt + 0.5 && t > j.movedAt + 0.5;
     const atRest = j.rest.update(positions, frames * FRAME_DT, armed);
     const done = !animator.pending(t) && !j.holding && (atRest || t >= restDeadline(params.duration, j.movedAt));
+    // At rest with the body standing: the garment is fastened to the skeleton as it hangs (for the next run).
+    if (done && !animator.sample(t, bones)) solver.bind();
     if (done || performance.now() - lastPost >= POST_INTERVAL_MS) {
       lastPost = performance.now();
       const posed = animator.sample(t, bones) ? Float32Array.from(bones) : null;
@@ -190,6 +196,15 @@ ctx.onmessage = (e: MessageEvent<WorkerRequest>) => {
   }
   if (msg.type === "grab") {
     grab(msg);
+    return;
+  }
+  if (msg.type === "bind") {
+    const g = gpuModel;
+    if (g?.id === msg.id) {
+      const p = g.model.params;
+      const tethers = bindTethers(g.model, msg.positions, g.sdf, p.skinGap + p.thickness / 2);
+      post({ type: "tethers", id: msg.id, tethers }, [tethers.buffer]);
+    }
     return;
   }
   if (msg.type === "tangles") {

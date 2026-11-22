@@ -112,8 +112,16 @@ export function tensileModuli(p: ClothParams): { warp: number; weft: number } {
  * cape's neckline was already a ring when it came down from where it is laid, at the height
  * of the chin: one time in two it closed over the chin and stayed hooked on it, the whole
  * cape hanging from the head.
+ *
+ * Until then the two points are neither free nor held together: they may part by `slack` (m),
+ * or by what they were put on with when that is more (ClothModel.seamStart). Free, a slippery
+ * cape (satin) with no hood to hold it slid off the shoulders and was on the floor before its
+ * clasp closed — a hand's breadth is less than a neck, it cannot pass. Held together from the
+ * start (the corners of a cape's fronts are laid a centimetre apart), the neckline was a ring
+ * again while the hood's seams drew it up to the chin, and the clasp ended in the mouth: a
+ * hand's breadth lets the chin through.
  */
-export const CLASP = { delay: 1.5, reach: 0.6, speed: 0.5 };
+export const CLASP = { delay: 1.5, reach: 0.6, speed: 0.5, slack: 0.1 };
 
 /** [start, count] of each colour in a colour-sorted constraint array. */
 export type ColorRanges = [number, number][];
@@ -133,7 +141,7 @@ export interface ClothModel {
   bendColors: ColorRanges;
   /** Stitched pairs: the seams' and the clasps'. */
   seams: Uint32Array;
-  /** Distance of each pair before sewing (m); negative: a clasp, fastened later (CLASP). */
+  /** Distance of each pair before sewing (m); negative: a clasp — as far apart as it may ever be, fastened later (CLASP). */
   seamStart: Float32Array;
   seamColors: ColorRanges;
   /** Simulated time from which the garment is all put together: its seams closed, its clasps fastened (s). */
@@ -333,11 +341,13 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
   const onSeam = new Uint32Array(n);
   for (let s = 0; s < seamStart.length; s++) {
     const a = mesh.seams[2 * s], b = mesh.seams[2 * s + 1];
+    const apart = Math.hypot(initial[3 * a] - initial[3 * b], initial[3 * a + 1] - initial[3 * b + 1], initial[3 * a + 2] - initial[3 * b + 2]);
     if (s >= sewn) {
-      seamStart[s] = -1;
+      // A clasp: told by the sign, with how far apart its points may be until it is fastened (CLASP).
+      seamStart[s] = -Math.max(apart, CLASP.slack);
       continue;
     }
-    seamStart[s] = Math.hypot(initial[3 * a] - initial[3 * b], initial[3 * a + 1] - initial[3 * b + 1], initial[3 * a + 2] - initial[3 * b + 2]);
+    seamStart[s] = apart;
     onSeam[a] = onSeam[b] = 1;
   }
 

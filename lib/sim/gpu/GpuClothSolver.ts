@@ -3,9 +3,11 @@ import type { SdfGrid } from "../bodySdf";
 import type { PoseAt } from "../cloth";
 import { GRAB, selfInterval, type GrabPatch } from "../grab";
 import { assembling, bandLimit, substepState, sweepPlan, type ClothModel } from "../model";
+import { TETHER_STRIDE } from "../tether";
 import { SELF_CELLS_PER_AXIS } from "../selfCollision";
 import {
   bandsWGSL,
+  tetherWGSL,
   bendingWGSL,
   contactsWGSL,
   grabWGSL,
@@ -67,6 +69,11 @@ export class GpuClothSolver {
   private readonly motionReadback: GPUBuffer;
   /** The bands' longest lengths (model.ts BandModel.rest), rewritten while belts are drawn in. */
   private readonly bandRest: GPUBuffer | null;
+  /** Motion mode's tethers (tether.ts): none until setTethers. */
+  private readonly tethers: GPUBuffer;
+  private bound = false;
+  /** Motion mode: the cloth held by its tethers, no self-collision (once it has been bound). */
+  tethered = false;
   private readonly tangle: GPUBuffer | null = null;
   private readonly positionsReadback: GPUBuffer;
   private positionsPending = false;
@@ -170,6 +177,9 @@ export class GpuClothSolver {
     const bending = pipeline(bendingWGSL);
     const sew = pipeline(seamsWGSL);
     const contacts = pipeline(contactsWGSL);
+    // Motion mode: the tethers, every vertex free until they are bound.
+    const tether = pipeline(tetherWGSL);
+    this.tethers = storage(new Float32Array(TETHER_STRIDE * n).fill(-1));
     const velocity = pipeline(velocityWGSL);
     // The hand: one invocation, while the cloth is held.
     const grab = pipeline(grabWGSL);
@@ -277,6 +287,8 @@ export class GpuClothSolver {
       ),
       contacts0: group(contacts, 0, [this.positions, onSeam, sdfData, restPos, skin, this.bones, prev, storage(sdf.limbs)]),
       contacts1: substeps.map((s) => group(contacts, 1, [frame, substepSlot(s), grid])),
+      tether0: group(tether, 0, [this.positions, this.tethers, skin, this.bones]),
+      tether1: substeps.map((s) => group(tether, 1, [substepSlot(s), grid])),
       velocity0: group(velocity, 0, [this.positions, prev, vel]),
       velocity1: group(velocity, 1, [frame]),
     };
@@ -306,6 +318,7 @@ export class GpuClothSolver {
 
     this.encodeFrame = (encoder, early, held) => {
       const selfEvery = selfInterval(p, held);
+      const tethered = this.tethered && this.bound;
       const pass = encoder.beginComputePass();
       let current: GPUComputePipeline | null = null;
       const run = (pipe: GPUComputePipeline, g0: GPUBindGroup, g1: GPUBindGroup | null, count: number) => {
@@ -342,7 +355,9 @@ export class GpuClothSolver {
           pass.dispatchWorkgroups(bandCount);
           current = null;
         }
-        if (selfGroups && self && (s + 1) % selfEvery === 0)
+        // Motion mode (tether.ts): the cloth held by its tethers to the skeleton, no self-collision.
+        if (tethered) run(tether, bg.tether0, bg.tether1[s], n);
+        else if (selfGroups && self && (s + 1) % selfEvery === 0)
           for (const k of selfGroups(s)) {
             current = null; // the same pipeline runs on the triangle and the edge tables
             run(k.pipe, k.g0, k.g1, k.count);
@@ -467,6 +482,13 @@ export class GpuClothSolver {
         return out;
       })
       .finally(() => (this.positionsPending = false));
+  }
+
+  /** The garment fastened to the skeleton as it hangs (tether.ts bindTethers, worked out from read-back positions while the body stood). */
+  setTethers(tethers: Float32Array) {
+    if (tethers.byteLength !== this.tethers.size) return; // of another mesh
+    this.device.queue.writeBuffer(this.tethers, 0, tethers as Float32Array<ArrayBuffer>);
+    this.bound = true;
   }
 
   /** Tangled regions (untangle.ts output) for the self-collision passes. */

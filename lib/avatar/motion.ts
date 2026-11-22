@@ -542,6 +542,12 @@ export class Animator {
     );
   }
 
+  /** Whether the body runs at time t (past half-way from the walk to the run): motion mode's cue (lib/sim/tether.ts). */
+  running(t: number): boolean {
+    const w = this.walk;
+    return !!w && t > w.rampStart && t < w.stop && this.runAt(t) > 0.5;
+  }
+
   /** Whether a motion is under way or scheduled at time t or later. */
   pending(t: number): boolean {
     return (

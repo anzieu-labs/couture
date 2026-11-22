@@ -1,4 +1,5 @@
 import type { P2 } from "./curves";
+import { defaultZone } from "./free";
 import type { Clasp, Pattern, Piece, PieceId, PiecePoint } from "./types";
 
 /**
@@ -115,4 +116,27 @@ export function validClasps(pattern: Pattern, clasps: readonly Clasp[]): Clasp[]
     const a = piecePointPosition(pattern, c.a), b = piecePointPosition(pattern, c.b);
     return !!a && !!b && !(c.a.piece === c.b.piece && Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.2);
   });
+}
+
+/** How far apart, as drawn, the two points of a clasp may be (cm) when they are drawn in the same frame: further, an end of an edge was taken for the other. */
+const CLASP_REACH = 25;
+
+/**
+ * A clasp told by someone who takes an edge's start for its end (a language model does): when
+ * its two points are drawn in the same frame — two pieces worn on the same zone — they are
+ * neighbours, and far apart, the nearest of the two edges' ends is what was meant.
+ */
+export function nearestEnds(pattern: Pattern, clasp: Clasp): Clasp {
+  const zone = (id: string) => {
+    const piece = pattern.pieces.find((p) => p.id === id);
+    return piece ? (piece.zone ?? defaultZone(pattern.kind, id)) : null;
+  };
+  if (zone(clasp.a.piece) !== zone(clasp.b.piece)) return clasp;
+  const apart = (c: Clasp) => {
+    const p = piecePointPosition(pattern, c.a), q = piecePointPosition(pattern, c.b);
+    return p && q ? Math.hypot(p[0] - q[0], p[1] - q[1]) : Infinity;
+  };
+  if (apart(clasp) <= CLASP_REACH) return clasp;
+  const turn = (p: PiecePoint): PiecePoint => ({ ...p, t: 1 - p.t });
+  return [clasp, { a: clasp.a, b: turn(clasp.b) }, { a: turn(clasp.a), b: clasp.b }, { a: turn(clasp.a), b: turn(clasp.b) }].sort((x, y) => apart(x) - apart(y))[0];
 }

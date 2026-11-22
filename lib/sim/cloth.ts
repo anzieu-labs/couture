@@ -3,6 +3,7 @@ import { LIMB_STRIDE, type BodySdf } from "./bodySdf";
 import { GRAB, selfInterval, solveGrab, type GrabPatch } from "./grab";
 import { assembling, bandLimit, BELT, PLINTH, substepState, sweepPlan, type ClothModel, type Sweep } from "./model";
 import { applyAffine, applyInverse, blendAt, IMPACT_MARGIN, IMPACT_SPEED, POSE_TOLERANCE } from "./posedBody";
+import { bindTethers, TETHER_STRIDE } from "./tether";
 import { SelfCollider, UNTANGLE_INTERVAL } from "./selfCollision";
 import { findTangles } from "./untangle";
 
@@ -86,6 +87,43 @@ export class CpuClothSolver {
     if (this.grab) this.grab.to = [...target];
   }
 
+  /** Motion mode's tethers (tether.ts), as bound by bind(); whether they hold the cloth. */
+  private tethers: Float32Array | null = null;
+  tethered = false;
+
+  /** Fastens the garment as it hangs now to the skeleton (tether.ts): to be called while the body stands still. */
+  bind() {
+    const p = this.m.params;
+    this.tethers = bindTethers(this.m, this.pos, this.sdf, p.skinGap + p.thickness / 2);
+  }
+
+  /** Whether the garment has been fastened to the skeleton. */
+  get bound(): boolean {
+    return !!this.tethers;
+  }
+
+  /** Each vertex kept within its reach of its support, where the bones take it (tether.ts). */
+  private solveTethers(posed: boolean) {
+    const { pos, sdf, blend: M } = this;
+    const T = this.tethers!, invMass = this.m.invMass;
+    const a = this.q;
+    for (let i = 0, o = 0; o < T.length; i++, o += TETHER_STRIDE) {
+      const reach = T[o + 3];
+      if (reach < 0 || !invMass[i]) continue;
+      if (posed) {
+        blendAt(sdf, this.bones!, T[o + 4], T[o + 5], T[o + 6], M);
+        applyAffine(M, T[o], T[o + 1], T[o + 2], a);
+      } else {
+        a[0] = T[o]; a[1] = T[o + 1]; a[2] = T[o + 2];
+      }
+      const dx = pos[3 * i] - a[0], dy = pos[3 * i + 1] - a[1], dz = pos[3 * i + 2] - a[2];
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (d <= reach) continue;
+      const k = reach / d;
+      pos[3 * i] = a[0] + dx * k; pos[3 * i + 1] = a[1] + dy * k; pos[3 * i + 2] = a[2] + dz * k;
+    }
+  }
+
   /** Advances `dt` seconds; `poseAt` animates the body (bone transforms at each substep). */
   step(dt: number, poseAt?: PoseAt) {
     const { m, pos, prev, vel, grab } = this;
@@ -119,7 +157,10 @@ export class CpuClothSolver {
         this.solveSeams(sewK, claspGoal, reverse);
       }
       this.solveBands(this.time);
-      if (this.self && (s + 1) % selfEvery === 0) {
+      // Motion mode (tether.ts): the cloth held by its tethers to the skeleton, no self-collision.
+      const tethered = this.tethered && !!this.tethers;
+      if (tethered) this.solveTethers(posed);
+      else if (this.self && (s + 1) % selfEvery === 0) {
         if (selfActive && this.time - this.untangledAt >= UNTANGLE_INTERVAL) {
           this.untangledAt = this.time;
           findTangles(pos, m.triangles, m.self!, this.self.tangle);
@@ -276,8 +317,8 @@ export class CpuClothSolver {
       const wa = invMass[a], wb = invMass[b], w = wa + wb;
       const dx = pos[3 * a] - pos[3 * b], dy = pos[3 * a + 1] - pos[3 * b + 1], dz = pos[3 * a + 2] - pos[3 * b + 2];
       const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      // A clasp (negative start) is fastened once the garment is on (model.ts CLASP).
-      const target = seamStart[s] < 0 ? claspGoal : seamStart[s] * sewK;
+      // A clasp (negative start) is fastened once the garment is on, and until then opens no further than -start (model.ts CLASP).
+      const target = seamStart[s] < 0 ? Math.min(claspGoal, -seamStart[s]) : seamStart[s] * sewK;
       if (len <= target || len < 1e-9 || !w) continue;
       const f = (len - target) / (len * w);
       pos[3 * a] -= dx * f * wa; pos[3 * a + 1] -= dy * f * wa; pos[3 * a + 2] -= dz * f * wa;

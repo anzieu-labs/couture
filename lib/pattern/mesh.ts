@@ -2,6 +2,7 @@ import Constrainautor from "@kninnug/constrainautor";
 import Delaunator from "delaunator";
 import { piecePointPosition } from "./clasp";
 import { polylineLength, resample, type P2 } from "./curves";
+import { defaultZone } from "./free";
 import type { Pattern, PieceId, Zone } from "./types";
 
 /**
@@ -215,7 +216,7 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
     triangles: new Uint32Array(tris),
     piece: Uint8Array.from(pieceOf),
     pieceIds: pattern.pieces.map((p) => p.id),
-    zones: pattern.pieces.map((p) => p.zone ?? (p.id === "back" ? "back" : p.id === "sleeve+" ? "armL" : p.id === "sleeve-" ? "armR" : "front")),
+    zones: pattern.pieces.map((p) => p.zone ?? defaultZone(pattern.kind, p.id)),
     edges: pattern.pieces.flatMap((p) => p.edges.map((e) => ({ piece: p.id, edge: e.id, vertices: Uint32Array.from(edgeVerts.get(key(p.id, e.id))!) }))),
     seams: new Uint32Array([...seams, ...clasps]),
     clasps: new Uint32Array(clasps),

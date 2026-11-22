@@ -52,6 +52,8 @@ export interface Scenario {
   walk?: boolean;
   /** Steps per minute (default: a walk; a run above motion.ts RUN_CADENCE). */
   cadence?: number;
+  /** The whole simulation even when the body runs: no motion mode (lib/sim/tether.ts), to compare. */
+  untethered?: boolean;
   /** Held pose taken once the garment is sewn. */
   posture?: Posture;
   /** Solver parameter overrides. */
@@ -263,6 +265,10 @@ export function runScenario(body: Body, sc: Scenario, log: (line: string) => voi
       }
     }
     const t0 = performance.now();
+    // Motion mode, as the app does it: the garment is fastened to the skeleton while the body
+    // still stands (here, just before it moves), and held by its tethers while it runs.
+    if (!sc.untethered && !solver.bound && solver.time >= motionStart - 2 * FRAME_DT) solver.bind();
+    solver.tethered = !sc.untethered && solver.bound && animator.running(solver.time);
     solver.step(FRAME_DT, poseAt);
     const ms = performance.now() - t0;
     const t = solver.time;

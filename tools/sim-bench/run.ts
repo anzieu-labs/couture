@@ -28,10 +28,14 @@ const QUICK: Scenario[] = [
   { name: "cape jersey rest, thin body", garment: "cape", textile: "jersey", mode: "cpu", duration: 8, phenotype: { weight: 0 } },
   { name: "cape wool walk", garment: "cape", textile: "wool", mode: "cpu", duration: 11, walk: true },
   { name: "cape wool run", garment: "cape", textile: "wool", mode: "cpu", duration: 11, walk: true, cadence: 170 },
+  { name: "cape wool run, whole simulation", garment: "cape", textile: "wool", mode: "cpu", duration: 11, walk: true, cadence: 170, untethered: true },
   // The cape comes fastened at the neck (lib/pattern/cape.ts CAPE_CLASPS); without its clasp, a jersey one slips off the shoulders as it walks.
   { name: "cape jersey walk", garment: "cape", textile: "jersey", mode: "cpu", duration: 11, walk: true },
   { name: "cape jersey walk, no clasp (slips)", garment: "cape", textile: "jersey", mode: "cpu", duration: 11, walk: true, clasps: [] },
   { name: "tshirt jersey run", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 8, walk: true, cadence: 170 },
+  { name: "tshirt jersey run, whole simulation", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 8, walk: true, cadence: 170, untethered: true },
+  { name: "skirt jersey run", garment: "skirt.femme", textile: "jersey", mode: "cpu", duration: 8, walk: true, cadence: 170 },
+  { name: "skirt jersey run, whole simulation", garment: "skirt.femme", textile: "jersey", mode: "cpu", duration: 8, walk: true, cadence: 170, untethered: true },
   { name: "tshirt jersey squat", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 7, posture: "squatting" },
   { name: "skirt denim sit", garment: "skirt.femme", textile: "denim", mode: "cpu", duration: 7, posture: "sitting" },
   // Waistband elasticity: 10 % sits lower on the hips; none, the skirt falls — onto the floor.

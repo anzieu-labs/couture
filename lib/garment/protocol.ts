@@ -73,7 +73,14 @@ export interface TanglesRequest {
   positions: Float32Array;
 }
 
-export type WorkerRequest = DressRequest | MotionRequest | GrabRequest | TanglesRequest | { type: "cancel" };
+/** "gpu" mode: the garment fastened to the skeleton (sim/tether.ts) as it hangs in read-back positions, the body standing. */
+export interface BindRequest {
+  type: "bind";
+  id: number;
+  positions: Float32Array;
+}
+
+export type WorkerRequest = DressRequest | MotionRequest | GrabRequest | TanglesRequest | BindRequest | { type: "cancel" };
 
 /** Flat garment mesh as needed for rendering. */
 export interface GarmentGeometry {
@@ -100,4 +107,5 @@ export type WorkerResponse =
   /** `time`: simulated time; `bones`: transforms of the body pose the positions were simulated with, from the standing pose (null: standing still). */
   | { type: "frame"; id: number; positions: Float32Array; time: number; progress: number; bones: Float32Array | null }
   | { type: "tangles"; id: number; tangle: Float32Array }
+  | { type: "tethers"; id: number; tethers: Float32Array }
   | { type: "error"; id: number; message: string };

@@ -10,6 +10,8 @@ export interface SimulatorEvents {
   onFrame: (positions: Float32Array, time: number, progress: number, bones: Float32Array | null) => void;
   /** GPU mode: tangled regions of the positions sent with `untangle`. */
   onTangles: (tangle: Float32Array) => void;
+  /** GPU mode: the tethers of the positions sent with `bind`. */
+  onTethers: (tethers: Float32Array) => void;
 }
 
 /** Main-thread handle on the garment simulation worker. */
@@ -29,6 +31,7 @@ export class GarmentSimulator {
       else if (msg.type === "model") this.events.onModel(msg);
       else if (msg.type === "frame") this.events.onFrame(msg.positions, msg.time, msg.progress, msg.bones);
       else if (msg.type === "tangles") this.events.onTangles(msg.tangle);
+      else if (msg.type === "tethers") this.events.onTethers(msg.tethers);
       else console.error("Garment simulation failed:", msg.message);
     };
   }
@@ -56,6 +59,11 @@ export class GarmentSimulator {
    */
   untangle(positions: Float32Array) {
     this.worker.postMessage({ type: "tangles", id: this.shown, positions } satisfies WorkerRequest, [positions.buffer]);
+  }
+
+  /** GPU mode: asks for the displayed garment to be fastened to the skeleton as it hangs in these positions (the body standing still). */
+  bind(positions: Float32Array) {
+    this.worker.postMessage({ type: "bind", id: this.shown, positions } satisfies WorkerRequest, [positions.buffer]);
   }
 
   cancel() {

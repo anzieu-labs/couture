@@ -46,6 +46,8 @@ interface Props {
 }
 
 const GAP = 8; // cm between pieces
+const ROW_GAP = 14; // cm between rows of pieces: their names are written above them
+const MARGIN = 6; // cm round the pieces when they are framed
 const ZOOM = { min: 0.6, max: 80 }; // px per cm
 /** Clasps: their colour, and (screen px) how close to a piece a click counts and to its outline it snaps. */
 const CLASP = { color: "#b83280", reach: 12, snap: 8 };
@@ -152,17 +154,6 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
     [pattern, allowances],
   );
 
-  const layout = useMemo(() => {
-    const slots = [];
-    let x = 0;
-    for (const piece of shownPieces(committed)) {
-      const b = bounds(outline(piece));
-      slots.push({ id: piece.id, name: piece.name, left: x, ox: x - b.minX, oy: b.maxY, w: b.maxX - b.minX, h: b.maxY - b.minY });
-      x += b.maxX - b.minX + GAP;
-    }
-    return { slots, width: x - GAP, height: Math.max(...slots.map((s) => s.h)) };
-  }, [committed]);
-
   // ---- View (pan / zoom), sized to the container.
   const boxRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -174,20 +165,65 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Where each piece is drawn: in rows, as many as shows them largest in the room there is —
+  // one above the other in a tall panel, side by side in a wide one (in one row they were a
+  // strip across a tall panel, most of it empty).
+  const room = size && size.w > 0 && size.h > 0 ? size.w / size.h : 1;
+  const layout = useMemo(() => {
+    const boxes = shownPieces(committed).map((piece) => {
+      const b = bounds(outline(piece));
+      return { piece, b, w: b.maxX - b.minX, h: b.maxY - b.minY };
+    });
+    // Every way to cut the pieces, in their order, into rows (a break or not after each: a handful of pieces).
+    let best: { rows: (typeof boxes)[]; width: number; height: number; scale: number } | null = null;
+    for (let breaks = 0; breaks < 1 << Math.max(0, Math.min(boxes.length, 12) - 1); breaks++) {
+      const rows: (typeof boxes)[] = [[]];
+      boxes.forEach((box, i) => {
+        rows[rows.length - 1].push(box);
+        if (i < boxes.length - 1 && (breaks >> i) & 1) rows.push([]);
+      });
+      const width = Math.max(...rows.map((row) => row.reduce((w, box) => w + box.w, 0) + GAP * (row.length - 1)));
+      const height = rows.reduce((h, row) => h + Math.max(...row.map((box) => box.h)), 0) + ROW_GAP * (rows.length - 1);
+      const scale = Math.min(room / (width + 2 * MARGIN), 1 / (height + 2 * MARGIN + 4));
+      // Fewer rows when it makes no difference: the pieces read from left to right.
+      if (!best || scale > best.scale * 1.03) best = { rows, width, height, scale };
+    }
+    const slots = [];
+    let top = 0;
+    for (const row of best?.rows ?? []) {
+      // Each row centred under the widest.
+      let x = (best!.width - (row.reduce((w, box) => w + box.w, 0) + GAP * (row.length - 1))) / 2;
+      for (const { piece, b, w, h } of row) {
+        slots.push({ id: piece.id, name: piece.name, left: x, top, ox: x - b.minX, oy: top + b.maxY, w, h });
+        x += w + GAP;
+      }
+      top += Math.max(...row.map((box) => box.h)) + ROW_GAP;
+    }
+    return { slots, rows: best?.rows.map((row) => row.length).join("+") ?? "" };
+  }, [committed, room]);
+
   // Framing: the pieces that carry editable points (a cape's 2 m panels would shrink its hood
   // to a few pixels); the others stay a pan or a zoom away.
   const editable = useMemo(() => new Set(committed.handles.map((h) => h.piece)), [committed]);
   const fit = useCallback((): View | null => {
     if (!size || size.w === 0 || size.h === 0) return null;
-    const m = 6; // room for allowances and names
+    const m = MARGIN; // room for allowances and names
     const focus = layout.slots.filter((sl) => editable.has(sl.id));
     const slots = focus.length ? focus : layout.slots;
     const left = Math.min(...slots.map((sl) => sl.left)), right = Math.max(...slots.map((sl) => sl.left + sl.w));
-    const bw = right - left + 2 * m, bh = Math.max(...slots.map((sl) => sl.h)) + 2 * m + 4;
+    const top = Math.min(...slots.map((sl) => sl.top)), bottom = Math.max(...slots.map((sl) => sl.top + sl.h));
+    const bw = right - left + 2 * m, bh = bottom - top + 2 * m + 4;
     const s = Math.min(size.w / bw, size.h / bh);
-    return { s, x: left - m - (size.w / s - bw) / 2, y: -m - 4 - (size.h / s - bh) / 2 };
+    return { s, x: left - m - (size.w / s - bw) / 2, y: top - m - 4 - (size.h / s - bh) / 2 };
   }, [size, layout, editable]);
   if (!view && size && fit()) setView(fit());
+  // The pieces put in other rows (the panel changed shape): framed again, they are elsewhere.
+  const [rows, setRows] = useState(layout.rows);
+  if (rows !== layout.rows) {
+    setRows(layout.rows);
+    setView(fit());
+  }
 
   const toSheet = useCallback(
     (clientX: number, clientY: number): P2 => {
@@ -512,7 +548,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
               </ToolButton>
               {adding && (
                 <div className="absolute right-0 top-full z-20 mt-2 w-56 rounded-xl border border-line bg-panel p-2 shadow-lg" role="menu" aria-label="Nouvelle pièce">
-                  <p className="mb-1.5 px-0.5 text-[10.5px] leading-snug text-muted">Un rectangle, posé sur la zone du corps choisie : à retailler ensuite.</p>
+                  <p className="mb-1.5 px-0.5 text-[10.5px] leading-snug text-muted">Un rectangle (ou une demi-capuche), posé sur la zone du corps choisie : à retailler ensuite.</p>
                   <div className="grid grid-cols-2 gap-1.5">
                     {(Object.keys(ZONES) as Zone[]).map((zone) => (
                       <button

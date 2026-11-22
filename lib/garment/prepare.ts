@@ -130,7 +130,7 @@ export function prepareGarment(req: Pick<DressRequest, "mode" | "pattern" | "bod
   const hands = ["wrist.L", "wrist.R"].map((l) => body.rig.labels.indexOf(l)).filter((i) => i >= 0);
   const limbs = LIMBS.map((l) => body.rig.labels.indexOf(l)).filter((i) => i >= 0);
   const sdf = new BodySdf(stand.positions, stand.normals, min, max, h, 0.05, body.skin, { joints: hands, offset: HAND_INFLATE }, limbs, body.indices, (LARGEST_TRIANGLE * spacing) / 100);
-  seatGarment(mesh, initial, torso, pattern.kind, sdf);
+  seatGarment(mesh, initial, torso, sdf);
   orientOutward(mesh, initial, sdf);
   const hints = pattern.sim ?? {};
   const params: ClothParams = {

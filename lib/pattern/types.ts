@@ -43,9 +43,11 @@ export type PieceId = string;
 
 /**
  * Where a piece of a top is put on the body before sewing (lib/garment/place.ts): wrapped
- * round the trunk at the front or at the back, or round an arm.
+ * round the trunk at the front or at the back, round an arm; a half of a hood, standing on one
+ * side of the head; or a piece of a cape, laid flat on the shoulders round the neck, towards
+ * the front or towards the back.
  */
-export type Zone = "front" | "back" | "armL" | "armR";
+export type Zone = "front" | "back" | "armL" | "armR" | "hoodL" | "hoodR" | "capeFront" | "capeBack";
 
 /** Which allowance the cut line adds outside the edge (see `lib/pattern/markings.ts`). */
 export type EdgeAllowance = "seam" | "hem" | "none";

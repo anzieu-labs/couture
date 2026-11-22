@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { TorsoFrame } from "@/lib/avatar/bodyMeasures";
 import type { BodyMeasurement } from "@/lib/avatar/measure";
-import { withBelts } from "@/lib/pattern/belt";
-import { validClasps } from "@/lib/pattern/clasp";
-import { bakeFree, canCopy, copyFree, draftFree, simpleFree, type FreePattern } from "@/lib/pattern/free";
+import { BELT_STRETCH, validBelts, withBelts } from "@/lib/pattern/belt";
+import { nearestEnds, validClasps } from "@/lib/pattern/clasp";
+import type { DescribedPattern } from "@/app/api/pattern/route";
+import { sketchOf } from "@/lib/pattern/describe";
+import { bakeFree, copyFree, draftFree, simpleFree, type FreePattern } from "@/lib/pattern/free";
 import { importDxf, type DxfImport, type DxfUnits } from "@/lib/pattern/import/dxf";
 import { GARMENTS, garmentDef, type GarmentDef, type GarmentParams } from "@/lib/pattern/garments";
 import { NO_EDITS, type Belt, type BodyMeasures, type Clasp, type PatternEdits } from "@/lib/pattern/types";
@@ -71,6 +73,8 @@ function useEditHistory(kind: string) {
   const commitClasps = useCallback((clasps: readonly Clasp[]) => change({ clasps }), [change]);
   const commitBelts = useCallback((belts: readonly Belt[]) => change({ belts }), [change]);
   const commitFree = useCallback((free: FreePattern) => change({ free }), [change]);
+  /** A drawing changed along with its accessories, as one step to undo. */
+  const commitDrawing = useCallback((free: FreePattern, clasps: readonly Clasp[], belts: readonly Belt[]) => change({ free, clasps, belts }), [change]);
   /** A garment's history started afresh from `present` (a new drawing). */
   const restart = useCallback((key: string, present: Changes) => setAll((a) => ({ ...a, [key]: { past: [], present, future: [] } })), []);
   const undo = useCallback(
@@ -81,7 +85,7 @@ function useEditHistory(kind: string) {
     () => update((s) => (s.future.length ? { past: [...s.past, s.present], present: s.future[0], future: s.future.slice(1) } : s)),
     [update],
   );
-  return { edits: h.present.edits, clasps: h.present.clasps, belts: h.present.belts, free: h.present.free, drawing: all[FREE]?.present.free, commit, commitClasps, commitBelts, commitFree, restart, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
+  return { edits: h.present.edits, clasps: h.present.clasps, belts: h.present.belts, free: h.present.free, drawing: all[FREE]?.present.free, commit, commitClasps, commitBelts, commitFree, commitDrawing, restart, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
 }
 
 /** Pattern drafted from the measured body (+ edits), then sewn & draped with the textile's mechanics. */
@@ -165,7 +169,7 @@ export function useGarment(
   const startFree = (source: "simple" | "copy") => {
     if (!measures) return;
     const worn = garment.draft(measures, params, history.edits);
-    const copy = source === "copy" && kind !== FREE && canCopy(worn);
+    const copy = source === "copy" && kind !== FREE;
     history.restart(FREE, {
       edits: NO_EDITS,
       clasps: copy ? history.clasps : NO_CLASPS,
@@ -184,6 +188,138 @@ export function useGarment(
     history.restart(FREE, { edits: NO_EDITS, clasps: NO_CLASPS, belts: NO_BELTS, free: read.free });
     setKind(FREE);
     return read;
+  };
+  /**
+   * A new drawing made from a description by a language model (app/api/pattern/route.ts), and
+   * the garment worn becomes it; resolves with what was drawn, or rejects with a message for
+   * the user.
+   */
+  const askPattern = async (request: object): Promise<DescribedPattern> => {
+    const response = await fetch("/api/pattern", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) }).catch(() => null);
+    const drawn = (await response?.json().catch(() => null)) as (DescribedPattern & { error?: string }) | null;
+    if (!response?.ok || !drawn?.free) throw new Error(drawn?.error ?? "Le service de dessin n'a pas répondu. Réessayez dans un instant.");
+    return drawn;
+  };
+  const describeFree = async (description: string): Promise<DescribedPattern> => {
+    if (!measures) throw new Error("Le mannequin n'est pas encore prêt.");
+    const drawn = await askPattern({ description, measures });
+    history.restart(FREE, { edits: NO_EDITS, clasps: drawn.clasps ?? NO_CLASPS, belts: drawn.belts ?? NO_BELTS, free: drawn.free });
+    setKind(FREE);
+    return drawn;
+  };
+
+  // ---- The garment worn, changed (the assistant's retouches): whatever it is, it is changed as
+  // a drawing — its own when it is one (a step to undo), a copy of it when it is of the catalogue.
+  type Worn = { free: FreePattern; clasps: readonly Clasp[]; belts: readonly Belt[]; own: boolean };
+  const wornDrawing = (): Worn => {
+    if (!measures) throw new Error("Le mannequin n'est pas encore prêt.");
+    if (kind !== FREE) return { free: copyFree(garment.draft(measures, params, history.edits), measures), clasps: history.clasps, belts: history.belts, own: false };
+    if (!drawing) throw new Error("Il n'y a pas de patron à retoucher.");
+    return { free: drawing, clasps: history.clasps, belts: history.belts, own: true };
+  };
+  const putOn = (worn: Worn, free: FreePattern, clasps: readonly Clasp[], belts: readonly Belt[]) => {
+    if (worn.own) return history.commitDrawing(free, clasps, belts);
+    history.restart(FREE, { edits: NO_EDITS, clasps, belts, free });
+    setKind(FREE);
+  };
+  /** Pieces taken off the garment worn, told by their id or their name, with their seams and what was fastened to them. */
+  const removePieces = (told: readonly string[]) => {
+    const worn = wornDrawing();
+    const wanted = new Set(told.map((t) => t.trim().toLowerCase()));
+    const gone = worn.free.pieces.filter((p) => wanted.has(p.id.toLowerCase()) || wanted.has(p.name.toLowerCase()));
+    const names = (pieces: readonly { name: string }[]) => pieces.map((p) => p.name);
+    if (!gone.length) throw new Error(`Aucune pièce de ce nom. Pièces du vêtement : ${worn.free.pieces.map((p) => `${p.id} (${p.name})`).join(", ")}.`);
+    if (gone.length === worn.free.pieces.length) throw new Error("Un vêtement garde au moins une pièce.");
+    const off = new Set(gone.map((p) => p.id));
+    const free = { ...worn.free, pieces: worn.free.pieces.filter((p) => !off.has(p.id)), seams: worn.free.seams.filter((s) => !off.has(s.a.piece) && !off.has(s.b.piece)) };
+    putOn(worn, free, worn.clasps.filter((c) => !off.has(c.a.piece) && !off.has(c.b.piece)), worn.belts.filter((b) => !off.has(b.piece)));
+    return { removed: names(gone), left: names(free.pieces) };
+  };
+  // ---- Accessories put on by the assistant: as the 2D editor's tools do, told by edges.
+  const edgesOf = () => (pattern?.pieces ?? []).map((p) => `${p.id} : ${p.edges.map((e) => e.id).join(", ")}`).join(" ; ");
+  /** A clasp between two points of the garment, each told by how far along an edge it is (0: its start, 1: its end). */
+  const addClasp = (a: { piece: string; edge: string; t: number }, b: { piece: string; edge: string; t: number }) => {
+    if (!pattern) throw new Error("Le vêtement n'est pas encore prêt.");
+    const at = (p: typeof a) => ({ piece: p.piece, edge: p.edge, t: Math.min(1, Math.max(0, p.t)), offset: [0, 0] as [number, number] });
+    const clasp = nearestEnds(pattern, { a: at(a), b: at(b) });
+    if (!validClasps(pattern, [clasp]).length) throw new Error(`Ce fermoir ne tient pas : il relie deux points de bords du vêtement, à deux endroits différents. Bords : ${edgesOf()}.`);
+    history.commitClasps([...history.clasps, clasp]);
+    return { clasp: { a: { piece: clasp.a.piece, edge: clasp.a.edge, t: clasp.a.t }, b: { piece: clasp.b.piece, edge: clasp.b.edge, t: clasp.b.t } }, clasps: history.clasps.length + 1 };
+  };
+  /** A belt along a free edge, all the way round the garment; it takes the place of one already there. */
+  const addBelt = (piece: string, edge: string, stretch = BELT_STRETCH.initial) => {
+    if (!pattern) throw new Error("Le vêtement n'est pas encore prêt.");
+    const belt: Belt = { piece, edge, stretch: Math.min(BELT_STRETCH.max, Math.max(BELT_STRETCH.min, stretch)) };
+    const [put] = validBelts(pattern, [belt]);
+    if (!put) throw new Error(`Une ceinture suit un bord libre (non cousu) qui fait le tour du vêtement : une taille, un ourlet. Bords : ${edgesOf()}.`);
+    const round = new Set(put.ring.map((r) => `${r.piece}/${r.edge}`));
+    history.commitBelts([...history.belts.filter((b) => !round.has(`${b.piece}/${b.edge}`)), belt]);
+    return { belt, along: put.ring.map((r) => `${r.piece}/${r.edge}`) };
+  };
+  /** Every clasp, every belt, or both, taken off. */
+  const removeAccessories = (what: { clasps?: boolean; belts?: boolean }) => {
+    const removed = { clasps: what.clasps ? history.clasps.length : 0, belts: what.belts ? history.belts.length : 0 };
+    if (removed.clasps) history.commitClasps([]);
+    if (removed.belts) history.commitBelts([]);
+    return removed;
+  };
+  /**
+   * The garment worn redrawn by the pattern model with a change (app/api/pattern/route.ts, its
+   * `base`). What the model gives back unchanged is kept as it was drawn here — its curves to
+   * the point, the way its seams were sewn — and not as the model retold it.
+   */
+  const reshape = async (change: string): Promise<DescribedPattern> => {
+    const worn = wornDrawing();
+    const drawn = await askPattern({ description: change, measures, base: sketchOf(worn.free, worn.belts, worn.clasps, garment.name, "") });
+    const kept = new Set(drawn.unchanged ?? []);
+    const sides = (s: FreePattern["seams"][number]) => [`${s.a.piece}/${s.a.edge}`, `${s.b.piece}/${s.b.edge}`].sort().join(" ");
+    const sewn = new Map(worn.free.seams.map((s) => [sides(s), s.reverse]));
+    const free: FreePattern = {
+      next: worn.free.next,
+      pieces: drawn.free.pieces.map((p) => (kept.has(p.id) && worn.free.pieces.find((w) => w.id === p.id)) || p),
+      seams: drawn.free.seams.map((s) => (kept.has(s.a.piece) && kept.has(s.b.piece) && sewn.has(sides(s)) ? { ...s, reverse: sewn.get(sides(s))! } : s)),
+    };
+    putOn(worn, free, drawn.clasps ?? NO_CLASPS, drawn.belts ?? NO_BELTS);
+    return { ...drawn, free };
+  };
+  /**
+   * A garment of the catalogue worn (the one worn, when none is told) with some of its settings
+   * changed — each kept within what its slider allows, 0 where a length is worked out from the
+   * body. Returns the garment's name and the settings as taken; throws, with a message, when
+   * there is no such garment or setting.
+   */
+  const wear = (id: string | undefined, changes: readonly { key: string; value: number }[]) => {
+    const target = id ?? kind;
+    const def = GARMENTS.find((g) => g.id === target);
+    if (!def) throw new Error(target === FREE ? "Le vêtement porté est un patron dessiné : il n'a pas de réglages, seulement des points (éditeur 2D)." : "Ce vêtement n'est pas au catalogue.");
+    const next = { ...(allParams[target] ?? def.defaults) };
+    const unknown: string[] = [];
+    for (const { key, value } of changes) {
+      const spec = def.params.find((s) => s.key === key);
+      if (!spec) unknown.push(key);
+      else next[key] = spec.auto && value <= 0 ? 0 : Math.min(spec.max, Math.max(spec.min, value));
+    }
+    if (unknown.length) throw new Error(`Réglage inconnu pour ${def.name} : ${unknown.join(", ")}. Réglages : ${def.params.map((s) => s.key).join(", ")}.`);
+    setAllParams((a) => ({ ...a, [target]: next }));
+    setKind(target);
+    return { name: def.name, cut: def.cut, params: next };
+  };
+  /** The garment worn and the settings of every garment as they were left (Studio's memory): what is not of the catalogue any more is left out. */
+  const restore = (id: unknown, settings: unknown) => {
+    if (settings && typeof settings === "object") {
+      const kept: Record<string, GarmentParams> = {};
+      for (const g of GARMENTS) {
+        const told = (settings as Record<string, unknown>)[g.id];
+        if (!told || typeof told !== "object") continue;
+        kept[g.id] = { ...g.defaults };
+        for (const spec of g.params) {
+          const v = (told as Record<string, unknown>)[spec.key];
+          if (typeof v === "number" && Number.isFinite(v)) kept[g.id][spec.key] = spec.auto && v <= 0 ? 0 : Math.min(spec.max, Math.max(spec.min, v));
+        }
+      }
+      setAllParams((a) => ({ ...a, ...kept }));
+    }
+    if (GARMENTS.some((g) => g.id === id)) setKind(id as string);
   };
   const { commit: commitEdits, commitFree } = history;
   // A drawn pattern has no edits: the points moved are moved in the drawing.
@@ -208,7 +344,16 @@ export function useGarment(
     setFree: commitFree,
     startFree,
     importFree,
+    describeFree,
+    wear,
+    removePieces,
+    reshape,
+    addClasp,
+    addBelt,
+    removeAccessories,
+    allParams,
+    restore,
     hasDrawing: !!drawing,
-    canCopy: kind !== FREE && !!pattern && canCopy(pattern),
+    canCopy: kind !== FREE && !!pattern,
   };
 }

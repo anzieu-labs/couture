@@ -261,6 +261,7 @@ export class GarmentViewer {
       onModel: (m) => this.startGpuGarment(m, m.model, m.sdf),
       onFrame: (positions, time, progress, bones) => this.updateGarment(positions, time, progress, bones),
       onTangles: (tangle) => this.garment?.gpu?.solver.setTangles(tangle),
+      onTethers: (tethers) => this.garment?.gpu?.solver.setTethers(tethers),
     });
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -639,6 +640,8 @@ export class GarmentViewer {
       frames = Math.min(MAX_CATCH_UP, Math.floor(this.lag / SIM_DT));
       this.lag = Math.min(this.lag - frames * SIM_DT, SIM_DT);
     }
+    // Motion mode (sim/tether.ts): while the body runs, the garment is held by its tethers.
+    solver.tethered = this.animator.running(this.clock);
     if (frames > 0) {
       const t0 = this.clock;
       solver.simulate(frames, SIM_DT, (encoder) => shell.encode(encoder), (t, out) => this.animator.sample(t0 + t, out));
@@ -671,7 +674,15 @@ export class GarmentViewer {
       gpu.still = whole && m.max < REST.speed ? gpu.still + 1 : 0;
     }
     gpu.done = !this.animator.pending(this.clock) && !holding && (gpu.still >= REST.windows || solver.time >= restDeadline(gpu.duration, gpu.movedAt));
-    if (gpu.done) this.overlay.hold(false);
+    if (gpu.done) {
+      this.overlay.hold(false);
+      // At rest with the body standing: the garment is fastened to the skeleton as it hangs (for
+      // the next run) — worked out in the worker, from the positions read back.
+      if (!this.animator.sample(this.clock, this.bones)) {
+        const read = solver.readPositions();
+        read?.then((p) => this.garment?.gpu === gpu && this.simulator.bind(p)).catch(() => {});
+      }
+    }
     this.onSimProgress?.(gpu.done ? 1 : Math.min(1, solver.time / gpu.duration));
   }
 

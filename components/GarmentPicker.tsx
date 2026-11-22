@@ -113,7 +113,7 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, hasDr
                 {current === DRAWING && <span className="ml-2 rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium text-white">Actuel</span>}
               </h3>
               <p className="mt-0.5 text-[11px] leading-snug text-muted">
-                Des pièces faites de points à glisser : on en ajoute, on courbe les bords, on coud deux bords en deux clics. Chaque pièce se pose sur une zone du corps.
+                Des pièces faites de points à glisser : on en ajoute, on courbe les bords, on coud deux bords en deux clics. Chaque pièce se pose sur une zone du corps. Pour le faire dessiner d&apos;après une description, demandez-le à l&apos;assistant.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -129,7 +129,7 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, hasDr
                 type="button"
                 onClick={() => onDraw("copy")}
                 disabled={!canCopy}
-                title={canCopy ? "Le vêtement porté devient un dessin : mêmes pièces, mêmes coutures, tout modifiable" : "Ce vêtement ne peut pas être copié (cape : son cercle se pose à plat ; ou c'est déjà un dessin)"}
+                title={canCopy ? "Le vêtement porté devient un dessin : mêmes pièces, mêmes coutures, tout modifiable" : "Le vêtement porté est déjà un dessin"}
                 className="rounded-full border border-ink px-3.5 py-1.5 text-xs font-medium transition-colors hover:bg-ink hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink"
               >
                 Copier le vêtement porté{worn ? ` (${worn.short.toLowerCase()})` : ""}

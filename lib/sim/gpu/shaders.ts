@@ -164,9 +164,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let d = getP(a) - getP(b);
   let len = length(d);
   // A clasp (negative start) is fastened once the garment is on: its two points may not be
-  // further apart than claspGoal (model.ts CLASP; huge until then).
+  // further apart than claspGoal (model.ts CLASP; huge until then), nor than -start (the
+  // slack left to it until then).
   let start = seamStart[s];
-  let goal = select(start * substep.sewK, substep.claspGoal, start < 0.0);
+  let goal = select(start * substep.sewK, min(substep.claspGoal, -start), start < 0.0);
   if (len <= goal || len < 1e-9 || w == 0.0) { return; }
   let f = (len - goal) / (len * w);
   addP(a, -d * (f * wa));
@@ -271,31 +272,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }`;
 
 /**
- * Body field shared by the contact kernels: distance grid, skin influences, bone transforms
- * (expects the bindings sdf, skin, bones and the uniforms grid, substep).
+ * Skin field: the bone transform of the body at a rest-space point (expects the bindings skin,
+ * bones and the uniforms grid, substep).
  */
-const bodyFieldWGSL = /* wgsl */ `
+const skinFieldWGSL = /* wgsl */ `
 // floor: height of the floor under the feet, the top of the plinth (model.ts PLINTH); very low: none.
 struct Grid { min: vec3f, h: f32, dims: vec3u, floor: f32 }
 /** 3×4 affine transform, one row per vector. */
 struct Affine { r0: vec4f, r1: vec4f, r2: vec4f }
-
-fn cell(i: u32, j: u32, k: u32) -> f32 { return sdf[i + grid.dims.x * (j + grid.dims.y * k)]; }
-
-fn sampleSdf(p: vec3f) -> f32 {
-  let f = (p - grid.min) / grid.h;
-  let c = floor(f);
-  if (any(c < vec3f(0.0)) || any(c >= vec3f(grid.dims - vec3u(1u)))) { return 1.0; }
-  let t = f - c;
-  let i = u32(c.x);
-  let j = u32(c.y);
-  let k = u32(c.z);
-  let c00 = mix(cell(i, j, k), cell(i + 1u, j, k), t.x);
-  let c10 = mix(cell(i, j + 1u, k), cell(i + 1u, j + 1u, k), t.x);
-  let c01 = mix(cell(i, j, k + 1u), cell(i + 1u, j, k + 1u), t.x);
-  let c11 = mix(cell(i, j + 1u, k + 1u), cell(i + 1u, j + 1u, k + 1u), t.x);
-  return mix(mix(c00, c10, t.y), mix(c01, c11, t.y), t.z);
-}
 
 // Blended bone transform at a rest-space point: skin influences of the grid,
 // trilinearly interpolated (see lib/sim/posedBody.ts).
@@ -337,6 +321,61 @@ fn applyInverse(a: Affine, p: vec3f) -> vec3f {
   let c2 = cross(a.r0.xyz, a.r1.xyz);
   let det = dot(a.r0.xyz, c0);
   return select(vec3f(0.0), (c0 * d.x + c1 * d.y + c2 * d.z) / det, det != 0.0);
+}
+`;
+
+/**
+ * Motion mode (lib/sim/tether.ts): each vertex kept within its reach of its support, where
+ * the bones take it. tether: per vertex, the support's place when bound and the reach (< 0:
+ * free), then the place the bones are read at (the same).
+ */
+export const tetherWGSL = /* wgsl */ `
+@group(0) @binding(0) var<storage, read_write> pos: array<f32>;
+@group(0) @binding(1) var<storage, read> tether: array<vec4f>;
+@group(0) @binding(2) var<storage, read> skin: array<u32>;
+@group(0) @binding(3) var<storage, read> bones: array<vec4f>;
+@group(1) @binding(0) var<uniform> substep: Substep;
+@group(1) @binding(1) var<uniform> grid: Grid;
+${common}
+${skinFieldWGSL}
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  if (2u * i + 1u >= arrayLength(&tether)) { return; }
+  let bound = tether[2u * i];
+  if (bound.w < 0.0) { return; }
+  var anchor = bound.xyz;
+  if (substep.posed != 0u) { anchor = applyAffine(blendAt(tether[2u * i + 1u].xyz), bound.xyz); }
+  let off = getP(i) - anchor;
+  let d = length(off);
+  if (d <= bound.w) { return; }
+  let p = anchor + off * (bound.w / d);
+  pos[3u * i] = p.x;
+  pos[3u * i + 1u] = p.y;
+  pos[3u * i + 2u] = p.z;
+}`;
+
+/**
+ * Body field shared by the contact kernels: distance grid, skin influences, bone transforms
+ * (expects the bindings sdf, skin, bones and the uniforms grid, substep).
+ */
+const bodyFieldWGSL = /* wgsl */ `
+${skinFieldWGSL}
+fn cell(i: u32, j: u32, k: u32) -> f32 { return sdf[i + grid.dims.x * (j + grid.dims.y * k)]; }
+
+fn sampleSdf(p: vec3f) -> f32 {
+  let f = (p - grid.min) / grid.h;
+  let c = floor(f);
+  if (any(c < vec3f(0.0)) || any(c >= vec3f(grid.dims - vec3u(1u)))) { return 1.0; }
+  let t = f - c;
+  let i = u32(c.x);
+  let j = u32(c.y);
+  let k = u32(c.z);
+  let c00 = mix(cell(i, j, k), cell(i + 1u, j, k), t.x);
+  let c10 = mix(cell(i, j + 1u, k), cell(i + 1u, j + 1u, k), t.x);
+  let c01 = mix(cell(i, j, k + 1u), cell(i + 1u, j, k + 1u), t.x);
+  let c11 = mix(cell(i, j + 1u, k + 1u), cell(i + 1u, j + 1u, k + 1u), t.x);
+  return mix(mix(c00, c10, t.y), mix(c01, c11, t.y), t.z);
 }
 
 // Unit outward direction (normalized gradient of the distance).

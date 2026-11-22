@@ -32,3 +32,15 @@ export function resample(pts: P2[], segments: number): P2[] {
   }
   return out;
 }
+
+/** A smooth curve through the points (Catmull-Rom), `samples` segments between each two. */
+export function spline(pts: P2[], samples = 8): P2[] {
+  const out: P2[] = [pts[0]];
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+    const c1: P2 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+    const c2: P2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+    out.push(...cubic(p1, c1, c2, p2, samples).slice(1));
+  }
+  return out;
+}

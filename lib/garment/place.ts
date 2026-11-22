@@ -1,5 +1,6 @@
 import type { BodyShape } from "../avatar/anny";
 import type { TorsoFrame } from "../avatar/bodyMeasures";
+import { isFlat, isHood } from "../pattern/free";
 import type { GarmentMesh } from "../pattern/mesh";
 import type { GarmentKind } from "../pattern/types";
 
@@ -89,11 +90,14 @@ export function placeGarment(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFr
 }
 
 /**
- * T-shirt, and any top made of pieces worn on the trunk or on an arm (mesh.zones): the pieces
- * of the front and of the back wrapped on an elliptic cylinder around the torso, those of an
- * arm on a tube following it (a sleeve's underarm seam at the bottom) — each where its own
- * coordinates put it. Unstretched unless the garment is narrower than the body (e.g. a tight
- * sleeve).
+ * T-shirt, and any top made of pieces worn on the trunk, on an arm or on the head (mesh.zones):
+ * the pieces of the front and of the back wrapped on an elliptic cylinder around the torso,
+ * those of an arm on a tube following it (a sleeve's underarm seam at the bottom) — each where
+ * its own coordinates put it. Unstretched unless the garment is narrower than the body (e.g. a
+ * tight sleeve). The halves of a hood stand flat in vertical planes on either side of the head,
+ * as a cape's do (placeCape), face edge at the front: sewing closes them over the head and
+ * brings their neck edges down to the neckline. The pieces of a drawn cape are laid flat round
+ * the neck as placeCape lays the cape's, the hood just above them.
  */
 function placeTShirt(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Float32Array {
   const n = mesh.rest.length / 2;
@@ -111,6 +115,10 @@ function placeTShirt(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Fl
   const top = torso.hpsY + 0.02;
 
   const arms = { armL: armPath(shape, "L"), armR: armPath(shape, "R") };
+  const hoodX = torso.headHalfWidth + 0.025, faceZ = torso.headFrontZ + 0.01;
+  // A cape's pieces: flat above the shoulders, and its hood from there.
+  const laid = mesh.zones.some(isFlat) ? laidHeight(mesh, shape, torso, (i) => isFlat(mesh.zones[mesh.piece[i]])) : null;
+  const hoodY = laid === null ? top : laid + 0.02;
 
   for (let i = 0; i < n; i++) {
     const zone = mesh.zones[mesh.piece[i]];
@@ -121,6 +129,14 @@ function placeTShirt(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Fl
       out[o] = wrap.rx * Math.sin(theta);
       out[o + 1] = top + y;
       out[o + 2] = torso.centerZ + (zone === "front" ? 1 : -1) * wrap.rz * Math.cos(theta);
+    } else if (isHood(zone)) {
+      out[o] = zone === "hoodL" ? hoodX : -hoodX;
+      out[o + 1] = hoodY + y;
+      out[o + 2] = faceZ - Math.abs(x);
+    } else if (isFlat(zone)) {
+      out[o] = x;
+      out[o + 1] = laid!;
+      out[o + 2] = torso.neckCenterZ + (zone === "capeBack" ? y : -y);
     } else {
       const hw = halfWidth.get(mesh.piece[i])!;
       // Circumference = sleeve width, unless the arm is wider (tight sleeve).
@@ -145,12 +161,19 @@ function placeTShirt(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Fl
  * the shoulder line, where the fewest of its points start inside the body (the lowest of them;
  * a few always do, by a few millimetres: the throat is not as round as the neckline), and the
  * hood comes down with it.
+ * Told by the zones of the pieces (mesh.zones): a drawn cape is seated like the catalogue's,
+ * and a garment with nothing laid on the shoulders is left where it is.
  */
-export function seatGarment(mesh: GarmentMesh, placed: Float32Array, torso: TorsoFrame, kind: GarmentKind, body: { sample(x: number, y: number, z: number): number }) {
-  if (kind !== "cape") return;
+export function seatGarment(mesh: GarmentMesh, placed: Float32Array, torso: TorsoFrame, body: { sample(x: number, y: number, z: number): number }) {
   const n = placed.length / 3;
-  const disc: number[] = [];
-  for (let i = 0; i < n; i++) if (!mesh.pieceIds[mesh.piece[i]].startsWith("hood")) disc.push(3 * i);
+  // The cape's pieces, and what comes down with them (its hood) — a drawn cape's are told by their zones.
+  const disc: number[] = [], worn: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const zone = mesh.zones[mesh.piece[i]];
+    if (isFlat(zone)) disc.push(3 * i);
+    if (isFlat(zone) || isHood(zone)) worn.push(3 * i);
+  }
+  if (!disc.length) return;
   const laid = placed[disc[0] + 1];
   let seat = laid, fewest = Infinity;
   for (let y = torso.hpsY + CAPE_SEAT.lowest; y < laid; y += CAPE_SEAT.step) {
@@ -158,11 +181,30 @@ export function seatGarment(mesh: GarmentMesh, placed: Float32Array, torso: Tors
     for (const o of disc) if (body.sample(placed[o], y, placed[o + 2]) < 0) inside++;
     if (inside < fewest) [fewest, seat] = [inside, y];
   }
-  for (let o = 1; o < placed.length; o += 3) placed[o] += seat - laid;
+  for (const o of worn) placed[o + 1] += seat - laid;
 }
 
 /** Heights tried for the disc of a cape (seatGarment): from `lowest` above the HPS up to where it is laid, every `step` (m). */
 const CAPE_SEAT = { lowest: 0.005, step: 0.005 };
+
+/**
+ * The height a cape's pieces are laid flat at: above every point of the body under them near
+ * the neck (shoulders, trapezius), the head excluded (chin and skull are higher up, but inside
+ * or above the hood). `ring` tells the vertices that go round the neck: the nearest to the
+ * neck's axis gives the neckline's radius.
+ */
+function laidHeight(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame, ring: (vertex: number) => boolean): number {
+  const r = mesh.rest;
+  let r1 = Infinity;
+  for (let i = 0; i < r.length / 2; i++) if (ring(i)) r1 = Math.min(r1, Math.hypot(r[2 * i], r[2 * i + 1]));
+  let top = torso.hpsY;
+  const p = shape.positions;
+  for (let v = 0; v < p.length; v += 3) {
+    const d = Math.hypot(p[v], p[v + 2] - torso.neckCenterZ);
+    if (d > r1 - 0.01 && d < 0.45 && p[v + 1] < torso.hpsY + 0.05) top = Math.max(top, p[v + 1]);
+  }
+  return top + 0.015;
+}
 
 /**
  * Cape (lib/pattern/cape.ts): the full circle is flat, so it is laid horizontally
@@ -178,20 +220,8 @@ function placeCape(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Floa
   const r = mesh.rest;
   const backIdx = mesh.pieceIds.indexOf("back");
 
-  // Neckline radius = closest back-panel vertex to the circle's centre.
-  let r1 = Infinity;
-  for (let i = 0; i < n; i++) if (mesh.piece[i] === backIdx) r1 = Math.min(r1, Math.hypot(r[2 * i], r[2 * i + 1]));
-
-  // Height: above every body point under the disc near the neck (shoulders, trapezius),
-  // the head excluded (chin and skull are higher up but inside or above the hood).
   const z0 = torso.neckCenterZ;
-  let top = torso.hpsY;
-  const p = shape.positions;
-  for (let v = 0; v < p.length; v += 3) {
-    const d = Math.hypot(p[v], p[v + 2] - z0);
-    if (d > r1 - 0.01 && d < 0.45 && p[v + 1] < torso.hpsY + 0.05) top = Math.max(top, p[v + 1]);
-  }
-  const capeY = top + 0.015;
+  const capeY = laidHeight(mesh, shape, torso, (i) => mesh.piece[i] === backIdx);
 
   const hx = torso.headHalfWidth + 0.025;
   const hoodY = capeY + 0.02;

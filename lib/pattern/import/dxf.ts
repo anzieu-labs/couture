@@ -214,6 +214,7 @@ function pieceOf(id: string, name: string, zone: Zone, loop: P2[], turns: P2[], 
 
 /** Where a piece is worn, from its name (French or English); the front when it says nothing. */
 function zoneOf(name: string, sleeves: number): Zone {
+  if (/capuche|hood/i.test(name)) return /droit|right/i.test(name) ? "hoodR" : "hoodL";
   if (/manche|sleeve|bras|arm/i.test(name)) return sleeves % 2 ? "armR" : "armL";
   return /\bdos\b|back|arri[eè]re/i.test(name) ? "back" : "front";
 }
