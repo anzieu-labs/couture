@@ -18,9 +18,11 @@ export interface DressRequest {
   mode: "gpu" | "cpu";
   pattern: Pattern;
   body: {
-    /** Rest pose. */
+    /** The morphology's rest pose (the garment is prepared around the body as it stands: prepare.ts). */
     positions: Float32Array;
     normals: Float32Array;
+    /** The body's triangles (3 vertex indices each). */
+    indices: Uint16Array | Uint32Array;
     joints: Record<string, [number, number, number]>;
     skin: SkinWeights;
     /** Animation rig: joint labels (keys of `joints`) and parent indices. */
@@ -36,7 +38,7 @@ export interface MotionSettings {
   walking: boolean;
   /** Steps per minute. */
   cadence: number;
-  /** Wrist targets (rest frame, m) of the arms placed by hand; null: the arm follows the spread. */
+  /** Wrist targets (body frame, m) of the arms placed by hand; null: the arm follows the spread. */
   hands: Record<Side, [number, number, number] | null>;
   /** Standing, seated or squatting. */
   posture: Posture;
@@ -48,7 +50,7 @@ export interface MotionRequest {
   walk?: boolean;
   turn?: boolean;
   cadence?: number;
-  /** Wrist target of one arm (rest frame, m); null releases it. */
+  /** Wrist target of one arm (body frame, m); null releases it. */
   hand?: { side: Side; target: [number, number, number] | null };
   posture?: Posture;
 }
@@ -93,10 +95,9 @@ export interface GarmentGeometry {
 }
 
 export type WorkerResponse =
-  /** `restPose`: the positions before sewing around the body's rest pose (the collision space). */
-  | ({ type: "model"; id: number; model: ClothModel; sdf: SdfGrid; restPose: Float32Array } & GarmentGeometry)
+  | ({ type: "model"; id: number; model: ClothModel; sdf: SdfGrid } & GarmentGeometry)
   | ({ type: "mesh"; id: number } & GarmentGeometry)
-  /** `time`: simulated time; `bones`: transforms of the body pose the positions were simulated with (null: rest pose). */
+  /** `time`: simulated time; `bones`: transforms of the body pose the positions were simulated with, from the standing pose (null: standing still). */
   | { type: "frame"; id: number; positions: Float32Array; time: number; progress: number; bones: Float32Array | null }
   | { type: "tangles"; id: number; tangle: Float32Array }
   | { type: "error"; id: number; message: string };

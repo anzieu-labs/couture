@@ -8,12 +8,13 @@ import { constrain, withDelta } from "@/lib/pattern/edit";
 import type { ExportOptions } from "@/lib/pattern/export";
 import { DEFAULT_ALLOWANCES } from "@/lib/pattern/markings";
 import type { PatternEdits } from "@/lib/pattern/types";
-import { TEXTILES, type Textile } from "@/lib/textiles/catalog";
+import { CUSTOM_TEXTILE, customTextile, TEXTILES, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
 import type { FitMode } from "@/lib/viewer/fitMap";
 import type { ViewPreset } from "@/lib/viewer/GarmentViewer";
 import { FitLegend } from "./FitLegend";
 import { useGarment } from "./hooks/useGarment";
+import { useLocalSpans } from "./hooks/useLocalSpans";
 import { useMorphology } from "./hooks/useMorphology";
 import { useViewer } from "./hooks/useViewer";
 import { MorphologyPanel } from "./MorphologyPanel";
@@ -51,7 +52,7 @@ const defaultColors = (t: Textile): TextileColors => ({ primary: t.defaultColor,
 
 export default function Studio() {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const { viewerRef, status, backend, simProgress, simBackend } = useViewer(viewportRef);
+  const { viewerRef, status, simProgress, simBackend } = useViewer(viewportRef);
   const ready = status === "ready";
 
   const [tab, setTab] = useState<Tab>("morpho");
@@ -67,25 +68,38 @@ export default function Studio() {
   const [editorOpen, setEditorOpen] = useState(false);
   const closeEditor = useCallback(() => setEditorOpen(false), []);
   const selectTab = (id: Tab) => {
+    // Poses and motion belong to the pose tab: leaving it, the mannequin stands still again.
+    if (tab === "pose" && id !== "pose") {
+      setWalking(false);
+      setPosture("standing");
+      setCadence(CADENCE.default);
+      viewerRef.current?.releaseHands();
+    }
     setTab(id);
     setEditorOpen(id === "patron");
   };
 
   // Fabric
   const [textileId, setTextileId] = useState(TEXTILES[0].id);
+  // The user's own textile (lib/textiles/catalog.ts customTextile), offered after the library's.
+  const [custom, setCustom] = useState(customTextile);
   const [colorsById, setColorsById] = useState<Record<string, TextileColors>>(() =>
-    Object.fromEntries(TEXTILES.map((t) => [t.id, defaultColors(t)])),
+    Object.fromEntries([...TEXTILES, customTextile()].map((t) => [t.id, defaultColors(t)])),
   );
-  const [scale, setScale] = useState(1);
-  const textile = TEXTILES.find((t) => t.id === textileId)!;
-  const colors = colorsById[textileId];
+  const textiles = useMemo(() => [...TEXTILES, custom], [custom]);
+  const textile = textileId === CUSTOM_TEXTILE ? custom : TEXTILES.find((t) => t.id === textileId)!;
+  // A second colour for the looks that take one, whatever the textile's colours were chosen for.
+  const stored = colorsById[textileId];
+  const colors = useMemo(() => ({ primary: stored.primary, secondary: textile.secondary ? (stored.secondary ?? textile.secondary.default) : undefined }), [stored, textile.secondary]);
 
   const body = useMorphology(viewerRef, ready);
+  const [showLocal, setShowLocal] = useState(false);
+  const local = useLocalSpans(viewerRef, ready, body.morph, tab === "morpho" && showLocal);
   const garment = useGarment(viewerRef, ready, body.measurements, textile);
 
   useEffect(() => {
-    if (ready) viewerRef.current?.setFabric(textile, colors, scale);
-  }, [ready, textile, colors, scale, viewerRef]);
+    if (ready) viewerRef.current?.setFabric(textile, colors);
+  }, [ready, textile, colors, viewerRef]);
 
   useEffect(() => {
     if (ready) viewerRef.current?.setAutoRotate(autoRotate);
@@ -156,8 +170,8 @@ export default function Studio() {
       {/* ------------------------------------------------------------ 3D */}
       <section className="relative flex h-[58dvh] shrink-0 md:h-full md:flex-1" aria-label="Aperçu 3D">
         {editorOpen && garment.measures && (
-          // Desktop: beside the 3D view (which follows the edits live); mobile: over it.
-          <div className="absolute inset-0 z-20 md:static md:z-auto md:w-1/2 md:shrink-0 md:border-r md:border-line">
+          // Desktop: on the right of the 3D view (which follows the edits live); mobile: over it.
+          <div className="absolute inset-0 z-20 md:static md:z-auto md:order-last md:w-1/2 md:shrink-0 md:border-l md:border-line">
             <PatternEditor
               key={garment.kind}
               garment={garment.garment}
@@ -169,6 +183,10 @@ export default function Studio() {
               focusKey={focus3d}
               onFocus={focusOnGarment}
               onCommit={garment.commit}
+              clasps={garment.clasps}
+              onClasps={garment.commitClasps}
+              belts={garment.belts}
+              onBelts={garment.commitBelts}
               onUndo={garment.undo}
               onRedo={garment.redo}
               canUndo={garment.canUndo}
@@ -203,29 +221,6 @@ export default function Studio() {
               </div>
             )}
             {fitMode && <FitLegend mode={fitMode} />}
-          </div>
-
-          <div className="absolute right-4 top-4 flex flex-col items-end gap-1.5 md:right-6 md:top-5">
-            {backend && (
-              <span
-                className="rounded-full border border-line bg-white/70 px-2.5 py-1 text-[11px] text-muted backdrop-blur"
-                title={backend === "WebGPU" ? "Rendu accéléré WebGPU" : "WebGPU indisponible : repli automatique sur WebGL 2"}
-              >
-                Rendu {backend}
-              </span>
-            )}
-            {simBackend && (
-              <span
-                className="rounded-full border border-line bg-white/70 px-2.5 py-1 text-[11px] text-muted backdrop-blur"
-                title={
-                  simBackend === "gpu"
-                    ? "Tissu simulé sur la carte graphique (WebGPU compute)"
-                    : "WebGPU indisponible pour le calcul : simulation sur le processeur"
-                }
-              >
-                Simulation {simBackend.toUpperCase()}
-              </span>
-            )}
           </div>
 
           {!ready && (
@@ -269,7 +264,8 @@ export default function Studio() {
       </section>
 
       {/* --------------------------------------------------------- Panel */}
-      <aside className="flex min-h-0 flex-1 flex-col border-line bg-panel md:h-full md:w-[360px] md:flex-none md:border-l">
+      {/* Desktop: the panel on the left, the 3D view then the 2D pattern on its right; mobile: under the 3D view. */}
+      <aside className="flex min-h-0 flex-1 flex-col border-line bg-panel md:order-first md:h-full md:w-[360px] md:flex-none md:border-r">
         <header className="border-b border-line px-5 pt-4 md:pt-5">
           <h1 className="text-lg font-semibold tracking-tight">Atelier</h1>
           <p className="text-xs text-muted">{garment.garment.name} · mannequin paramétrique</p>
@@ -301,6 +297,10 @@ export default function Studio() {
               onTargets={body.setTargets}
               saturated={body.saturated}
               fitting={body.fitting}
+              showLocal={showLocal}
+              onShowLocal={setShowLocal}
+              localTapes={local.tapes}
+              localSpans={local.spans}
             />
           )}
           {tab === "pose" && (
@@ -328,7 +328,6 @@ export default function Studio() {
               onGarment={garment.setKind}
               measures={garment.measures}
               progress={simProgress}
-              onResew={garment.resew}
               cutting={cutting}
               onCutting={setCutting}
               editorOpen={editorOpen}
@@ -341,11 +340,12 @@ export default function Studio() {
           {tab === "tissu" && (
             <TextilePanel
               textile={textile}
+              textiles={textiles}
               onTextile={setTextileId}
+              onCustom={setCustom}
+              colors={colors}
               colorsById={colorsById}
               onColor={(key, hex) => setColorsById((prev) => ({ ...prev, [textileId]: { ...prev[textileId], [key]: hex } }))}
-              scale={scale}
-              onScale={setScale}
             />
           )}
         </div>

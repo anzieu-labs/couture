@@ -1,6 +1,6 @@
-// Captures the garment picker's pictures (public/garments/<id>.webp): each garment of
-// lib/pattern/garments.ts, sewn and draped on the default mannequin, front view, the
-// interface hidden, cropped to 3:4.
+// Captures the garment picker's pictures (public/garments/<style>-<cut>.webp): each style of
+// lib/pattern/garments.ts in both cuts, sewn and draped on the mannequin of the cut (the
+// default man or woman), front view, the interface hidden, cropped to 3:4.
 //
 //   npm i --no-save playwright-core        (no browser download: uses the installed Chrome)
 //   node tools/thumbnails/capture.mjs [app URL, default http://localhost:3000]
@@ -17,10 +17,19 @@ const url = process.argv[2] ?? "http://localhost:3000/";
 const out = join(root, "public/garments");
 const SIZE = { w: 480, h: 640 };
 
-// Garments, from the catalogue source (id, name, image path).
-const src = readFileSync(join(root, "lib/pattern/garments.ts"), "utf8");
-const garments = [...src.matchAll(/id: "([^"]+)",\s*name: "([^"]+)",[\s\S]*?image: "([^"]+)"/g)].map(([, id, name, image]) => ({ id, name, image }));
-if (!garments.length) throw new Error("No garment found in lib/pattern/garments.ts");
+// Styles, from the catalogue source: the ids of STYLES, and the names of their blocks' styles
+// (`name: TSHIRT.name` reads the constant's own name).
+const dir = join(root, "lib/pattern");
+const src = readFileSync(join(dir, "garments.ts"), "utf8");
+const names = Object.fromEntries(
+  ["tshirt.ts", "cape.ts", "skirt.ts", "garments.ts"].flatMap((f) =>
+    [...readFileSync(join(dir, f), "utf8").matchAll(/const (\w+): \w+Style = \{ name: "([^"]+)"/g)].map(([, constant, name]) => [constant, name]),
+  ),
+);
+const styles = [...src.matchAll(/id: "([^"]+)",\s*kind: "[^"]+",\s*name: (\w+)\.name/g)].map(([, id, constant]) => ({ id, name: names[constant] }));
+if (!styles.length || styles.some((s) => !s.name)) throw new Error("Could not read the styles of lib/pattern/garments.ts");
+const CUTS = [["homme", "Homme"], ["femme", "Femme"]];
+const garments = CUTS.flatMap(([cut, label]) => styles.map((s) => ({ ...s, cut, label, image: `/garments/${s.id}-${cut}.webp` })));
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -35,8 +44,13 @@ mkdirSync(out, { recursive: true });
 
 const view = page.locator('section[aria-label="Aperçu 3D"]');
 for (const g of garments) {
+  // The mannequin of the cut, then the garment in that cut.
+  await page.getByRole("tab", { name: "Morphologie" }).click();
+  await page.getByRole("group", { name: "Morphotype" }).getByRole("button", { name: g.label, exact: true }).click();
+  await page.getByRole("tab", { name: "Patron" }).click();
   await page.getByRole("button", { name: "Changer", exact: true }).click();
-  await page.getByRole("dialog").getByRole("button", { name: g.name }).click();
+  await page.getByRole("dialog").getByRole("group", { name: "Coupe" }).getByRole("button", { name: g.label, exact: true }).click();
+  await page.getByRole("dialog").getByRole("listitem").getByRole("button", { name: g.name }).click();
   await page.waitForTimeout(2_000); // the new garment is being prepared
   await page.getByText("Le patron suit la morphologie").waitFor({ timeout: 90_000 }); // sewn, draped, at rest
   await page.getByRole("button", { name: "Face", exact: true }).click();
@@ -66,6 +80,6 @@ for (const g of garments) {
   );
   const file = join(root, "public", g.image);
   writeFileSync(file, Buffer.from(webp, "base64"));
-  console.log(`${g.name} → ${g.image} (${Math.round(Buffer.from(webp, "base64").length / 1024)} Ko)`);
+  console.log(`${g.name} (${g.cut}) → ${g.image} (${Math.round(Buffer.from(webp, "base64").length / 1024)} Ko)`);
 }
 await browser.close();

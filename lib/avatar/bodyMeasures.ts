@@ -66,6 +66,17 @@ function envelope(slicer: MeshSlicer, y0: number, y1: number, cuts: number) {
   return { halfWidth, zMin, zMax };
 }
 
+/** Upper arm girth (m): cut perpendicular to the arm, 45 % of the way to the elbow. */
+export function upperArmGirth(slicer: MeshSlicer, j: BodyShape["joints"], side: "L" | "R"): number {
+  const a = j[`upperarm01.${side}`], b = j[`lowerarm01.${side}`];
+  const d: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const l = Math.hypot(...d);
+  const origin: Vec3 = [a[0] + d[0] * 0.45, a[1] + d[1] * 0.45, a[2] + d[2] * 0.45];
+  const loops = slicer.plane(origin, [d[0] / l, d[1] / l, d[2] / l]);
+  const nearest = loops.reduce((best, l2) => (!best || l2.meanDist < best.meanDist ? l2 : best), loops[0]);
+  return nearest ? convexHullPerimeter(nearest.pts) : 0;
+}
+
 /** Depth of the torso envelope below the hip joints (m), and its number of cuts. */
 const ENVELOPE_BELOW_HIP = 0.25;
 const ENVELOPE_CUTS = 24;
@@ -81,18 +92,9 @@ export function measureForPattern(
   const hpsY = j["neck01"][1] + 0.01;
   const hipY = (j["upperleg01.L"][1] + j["upperleg01.R"][1]) / 2;
 
-  // Upper arm girth: cut perpendicular to the arm, 45 % of the way to the elbow.
-  const arm = (side: "L" | "R") => {
-    const a = j[`upperarm01.${side}`], b = j[`lowerarm01.${side}`];
-    const d: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    const l = Math.hypot(...d);
-    const origin: Vec3 = [a[0] + d[0] * 0.45, a[1] + d[1] * 0.45, a[2] + d[2] * 0.45];
-    const loops = slicer.plane(origin, [d[0] / l, d[1] / l, d[2] / l]);
-    const nearest = loops.reduce((best, l2) => (!best || l2.meanDist < best.meanDist ? l2 : best), loops[0]);
-    return nearest ? convexHullPerimeter(nearest.pts) : 0;
-  };
-
-  const upperArm = (arm("L") + arm("R")) / 2;
+  const upperArm = (upperArmGirth(slicer, j, "L") + upperArmGirth(slicer, j, "R")) / 2;
+  const span = (a: string, b: string) => Math.hypot(j[a][0] - j[b][0], j[a][1] - j[b][1], j[a][2] - j[b][2]);
+  const armLength = (side: "L" | "R") => span(`upperarm01.${side}`, `lowerarm01.${side}`) + span(`lowerarm01.${side}`, `wrist.${side}`);
 
   // Head, neck, floor (capes, hoods, long garments).
   let topY = -Infinity, floorY = Infinity;
@@ -149,6 +151,9 @@ export function measureForPattern(
       headWidth: 2 * head.halfWidth * 100,
       waistToHip: (waistY - hipLevel) * 100,
       waistToKnee: (waistY - kneeY) * 100,
+      hpsToWaist: (hpsY - waistY) * 100,
+      waistToFloor: (waistY - floorY) * 100,
+      armLength: (armLength("L") + armLength("R")) * 50,
     },
     torso: {
       halfWidth,

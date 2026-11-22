@@ -2,7 +2,7 @@ import { BONE_STRIDE } from "../../avatar/skeleton";
 import type { SdfGrid } from "../bodySdf";
 import type { PoseAt } from "../cloth";
 import { GRAB, selfInterval, type GrabPatch } from "../grab";
-import { assembling, substepState, sweepPlan, type ClothModel } from "../model";
+import { assembling, bandLimit, substepState, sweepPlan, type ClothModel } from "../model";
 import { SELF_CELLS_PER_AXIS } from "../selfCollision";
 import {
   bandsWGSL,
@@ -65,6 +65,8 @@ export class GpuClothSolver {
   private readonly encodeFrame: (encoder: GPUCommandEncoder, early: boolean, held: boolean) => void;
   private readonly encodeMotion: (encoder: GPUCommandEncoder) => void;
   private readonly motionReadback: GPUBuffer;
+  /** The bands' longest lengths (model.ts BandModel.rest), rewritten while belts are drawn in. */
+  private readonly bandRest: GPUBuffer | null;
   private readonly tangle: GPUBuffer | null = null;
   private readonly positionsReadback: GPUBuffer;
   private positionsPending = false;
@@ -72,8 +74,14 @@ export class GpuClothSolver {
   private readonly boneCount: number;
   private readonly boneScratch: Float32Array;
   private motionPending = false;
-  /** Latest measured motion: mean and max vertex speed (m/s), and the simulated time it was taken at. */
-  motion: { mean: number; max: number; time: number } | null = null;
+  /**
+   * Latest measured motion: how fast the vertices went, on average and the fastest of them
+   * (m/s), from one measurement (`since`, simulated time) to the next (`time`) — where they
+   * got to, not how they trembled on the way (shaders.ts motionWGSL).
+   */
+  motion: { mean: number; max: number; since: number; time: number } | null = null;
+  /** Simulated time of the positions the next measurement compares with. */
+  private seenAt = 0;
   private readonly held: GPUBuffer;
   private readonly grabUniform: GPUBuffer;
   /** The cloth held by hand: vertex count, inverse mass of the held point, and where the hand goes during the next frames. */
@@ -81,17 +89,13 @@ export class GpuClothSolver {
   /** Simulated time until which the cloth let go is still falling back. */
   private heldUntil = -Infinity;
 
-  /**
-   * `initial`: where the cloth starts (around the body as posed at time 0); `restPose`: the
-   * same positions around the body's rest pose, the collision space (default: the same).
-   */
+  /** `initial`: where the cloth starts, around the body the collision field `sdf` was built from. */
   constructor(
     private readonly device: GPUDevice,
     private readonly m: ClothModel,
     initial: Float32Array,
     sdf: SdfGrid,
     boneCount = 0,
-    restPose: Float32Array = initial,
   ) {
     const p = m.params;
     const n = m.vertexCount;
@@ -121,7 +125,7 @@ export class GpuClothSolver {
     const seams = storage(m.seams), seamStart = storage(m.seamStart);
     const onSeam = storage(m.onSeam);
     const sdfData = storage(sdf.data);
-    const restPos = storage(restPose);
+    const restPos = storage(initial);
     const skin = storage(sdf.skin ?? new Uint32Array(4));
     // Animated body: posing needs the skin grid.
     this.boneCount = sdf.skin ? boneCount : 0;
@@ -176,7 +180,8 @@ export class GpuClothSolver {
     // Bands (waistbands): one invocation each.
     const bandCount = m.bands.rest.length;
     const bands = bandCount ? pipeline(bandsWGSL) : null;
-    const bands0 = bands && group(bands, 0, [this.positions, invMass, storage(m.bands.ranges), storage(m.bands.rest), storage(m.bands.segments), storage(m.bands.vertices)]);
+    this.bandRest = bandCount ? storage(m.bands.rest) : null;
+    const bands0 = bands && group(bands, 0, [this.positions, invMass, storage(m.bands.ranges), this.bandRest!, storage(m.bands.segments), storage(m.bands.vertices)]);
 
     // Self-collisions.
     const self = m.self;
@@ -278,7 +283,7 @@ export class GpuClothSolver {
 
     const groups = (count: number) => Math.max(1, Math.ceil(count / WORKGROUP));
     const motion = pipeline(motionWGSL);
-    const motion0 = group(motion, 0, [vel, motionBuf]);
+    const motion0 = group(motion, 0, [this.positions, storage(initial), motionBuf]);
     this.encodeMotion = (encoder) => {
       encoder.clearBuffer(motionBuf);
       const pass = encoder.beginComputePass();
@@ -383,9 +388,13 @@ export class GpuClothSolver {
         anyPosed ||= posed;
         new Float32Array(slot, UNIFORM_SLOT * s, 2).set([st.gravity, st.sewK]);
         new Uint32Array(slot, UNIFORM_SLOT * s + 8, 4).set([st.sewing ? 1 : 0, posed ? 1 : 0, (s * stride) / 4, st.selfActive ? 1 : 0]);
+        new Float32Array(slot, UNIFORM_SLOT * s + 24, 1)[0] = Math.min(st.claspGoal, 1e9);
       }
       this.device.queue.writeBuffer(this.substepUniform, 0, slot);
       if (anyPosed) this.device.queue.writeBuffer(this.bones, 0, this.boneScratch as Float32Array<ArrayBuffer>);
+      // Belts being drawn in (model.ts bandLimit): the bands' lengths for this frame.
+      if (this.bandRest && this.time <= this.m.fastenedAt + dt)
+        this.device.queue.writeBuffer(this.bandRest, 0, Float32Array.from(this.m.bands.rest, (_, b) => Math.min(bandLimit(this.m.bands, b, p, this.time), 1e9)));
       const encoder = this.device.createCommandEncoder();
       this.encodeFrame(encoder, assembling(p, this.time), !!grab || this.time < this.heldUntil);
       if (f === frames - 1) after?.(encoder);
@@ -420,13 +429,15 @@ export class GpuClothSolver {
   }
 
   /**
-   * Measures the current motion asynchronously (a few bytes read back); the
-   * result lands in `motion`. No-op while a measurement is in flight.
+   * Measures the motion since the last call asynchronously (a few bytes read back); the
+   * result lands in `motion`. No-op while a measurement is in flight, or before any time
+   * has gone by.
    */
   measureMotion() {
-    if (this.motionPending) return;
+    const time = this.time, since = this.seenAt;
+    if (this.motionPending || time <= since) return;
     this.motionPending = true;
-    const time = this.time;
+    this.seenAt = time;
     const encoder = this.device.createCommandEncoder();
     this.encodeMotion(encoder);
     this.device.queue.submit([encoder.finish()]);
@@ -435,7 +446,7 @@ export class GpuClothSolver {
       .then(() => {
         const [sum, max] = new Uint32Array(this.motionReadback.getMappedRange());
         this.motionReadback.unmap();
-        this.motion = { mean: sum / this.m.vertexCount / 1000, max: max / 1000, time };
+        this.motion = { mean: sum / this.m.vertexCount / 1e5 / (time - since), max: max / 1e5 / (time - since), since, time };
       })
       .catch(() => {}) // device lost / destroyed buffer
       .finally(() => (this.motionPending = false));

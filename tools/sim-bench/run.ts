@@ -20,16 +20,38 @@ const QUICK: Scenario[] = [
   { name: "tshirt jersey rest", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 5 },
   { name: "tshirt denim rest", garment: "tshirt", textile: "denim", mode: "cpu", duration: 5 },
   { name: "tshirt jersey walk", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 9, walk: true },
-  { name: "skirt jersey walk", garment: "skirt", textile: "jersey", mode: "cpu", duration: 9, walk: true },
-  { name: "skirt denim walk", garment: "skirt", textile: "denim", mode: "cpu", duration: 9, walk: true },
+  { name: "skirt jersey walk", garment: "skirt.femme", textile: "jersey", mode: "cpu", duration: 9, walk: true },
+  { name: "skirt denim walk", garment: "skirt.femme", textile: "denim", mode: "cpu", duration: 9, walk: true },
+  // At rest on the shoulders, where the weight of the cape presses it on the skin — and on a thin
+  // body, whose sharper shoulders show through the cloth's triangles first.
+  { name: "cape jersey rest", garment: "cape", textile: "jersey", mode: "cpu", duration: 8 },
+  { name: "cape jersey rest, thin body", garment: "cape", textile: "jersey", mode: "cpu", duration: 8, phenotype: { weight: 0 } },
   { name: "cape wool walk", garment: "cape", textile: "wool", mode: "cpu", duration: 11, walk: true },
   { name: "cape wool run", garment: "cape", textile: "wool", mode: "cpu", duration: 11, walk: true, cadence: 170 },
+  // The cape comes fastened at the neck (lib/pattern/cape.ts CAPE_CLASPS); without its clasp, a jersey one slips off the shoulders as it walks.
+  { name: "cape jersey walk", garment: "cape", textile: "jersey", mode: "cpu", duration: 11, walk: true },
+  { name: "cape jersey walk, no clasp (slips)", garment: "cape", textile: "jersey", mode: "cpu", duration: 11, walk: true, clasps: [] },
   { name: "tshirt jersey run", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 8, walk: true, cadence: 170 },
   { name: "tshirt jersey squat", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 7, posture: "squatting" },
-  { name: "skirt denim sit", garment: "skirt", textile: "denim", mode: "cpu", duration: 7, posture: "sitting" },
+  { name: "skirt denim sit", garment: "skirt.femme", textile: "denim", mode: "cpu", duration: 7, posture: "sitting" },
   // Waistband elasticity: 10 % sits lower on the hips; none, the skirt falls — onto the floor.
-  { name: "skirt jersey walk, elastic waistband", garment: "skirt", textile: "jersey", mode: "cpu", duration: 9, walk: true, garmentParams: { waistband: 10 } },
-  { name: "skirt jersey, no waistband (falls)", garment: "skirt", textile: "jersey", mode: "cpu", duration: 6, garmentParams: { waistband: 40 } },
+  { name: "skirt jersey walk, elastic waistband", garment: "skirt.femme", textile: "jersey", mode: "cpu", duration: 9, walk: true, belts: [{ piece: "front", edge: "waist+", stretch: 0.1 }] },
+  { name: "skirt jersey, no waistband (falls)", garment: "skirt.femme", textile: "jersey", mode: "cpu", duration: 6, belts: [] },
+  // The rest of the catalogue (lib/pattern/garments.ts): each style in a cut and on a body the others are not on.
+  { name: "catalogue: tshirt femme, on a woman", garment: "tshirt.femme", textile: "jersey", mode: "cpu", duration: 5, phenotype: { gender: 1 } },
+  { name: "catalogue: long sleeves, walk", garment: "longsleeve", textile: "jersey", mode: "cpu", duration: 9, walk: true },
+  { name: "catalogue: tank femme, on a woman, walk", garment: "tank.femme", textile: "jersey", mode: "cpu", duration: 9, walk: true, phenotype: { gender: 1 } },
+  { name: "catalogue: tank homme", garment: "tank", textile: "jersey", mode: "cpu", duration: 5 },
+  { name: "catalogue: dress femme, on a woman, walk", garment: "dress.femme", textile: "jersey", mode: "cpu", duration: 9, walk: true, phenotype: { gender: 1 } },
+  { name: "catalogue: dress homme, walk", garment: "dress", textile: "jersey", mode: "cpu", duration: 9, walk: true },
+  { name: "catalogue: capelet wool, walk", garment: "capelet", textile: "wool", mode: "cpu", duration: 9, walk: true },
+  { name: "catalogue: capelet femme, on a woman", garment: "capelet.femme", textile: "wool", mode: "cpu", duration: 6, phenotype: { gender: 1 } },
+  { name: "catalogue: skirt homme, walk", garment: "skirt", textile: "denim", mode: "cpu", duration: 9, walk: true },
+  { name: "catalogue: long skirt femme, on a woman, walk", garment: "longskirt.femme", textile: "jersey", mode: "cpu", duration: 9, walk: true, phenotype: { gender: 1 } },
+  { name: "catalogue: long skirt homme, walk", garment: "longskirt", textile: "denim", mode: "cpu", duration: 9, walk: true },
+  // Belts (lib/pattern/belt.ts) that gather the edge they are sewn along: a t-shirt's hem, a dress's sleeves.
+  { name: "catalogue: tshirt, hem gathered by 20 %, walk", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 9, walk: true, belts: [{ piece: "front", edge: "hem+", stretch: -0.2 }] },
+  { name: "catalogue: skirt femme, waist gathered by 10 %, walk", garment: "skirt.femme", textile: "jersey", mode: "cpu", duration: 9, walk: true, phenotype: { gender: 1 }, belts: [{ piece: "front", edge: "waist+", stretch: -0.1 }] },
 ];
 /**
  * The cloth held by hand (lib/sim/grab.ts): lifted where it is free to follow, pulled where the
@@ -40,7 +62,7 @@ const GRAB: Scenario[] = [
   { name: "grab: tshirt jersey, hem lifted", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 7.5, grab: { where: "hem", at: 3, pull: [0.1, 0.2, 0.15], ramp: 0.5, hold: 1 } },
   { name: "grab: tshirt jersey, hem pulled down", garment: "tshirt", textile: "jersey", mode: "cpu", duration: 7.5, grab: { where: "hem", at: 3, pull: [0, -0.5, 0], ramp: 0.5, hold: 1 } },
   { name: "grab: tshirt denim, chest pulled sideways", garment: "tshirt", textile: "denim", mode: "cpu", duration: 7.5, grab: { where: "chest", at: 3, pull: [0.4, 0, 0], ramp: 0.5, hold: 1 } },
-  { name: "grab: skirt jersey, hem lifted", garment: "skirt", textile: "jersey", mode: "cpu", duration: 7.5, grab: { where: "hem", at: 3, pull: [0.2, 0.3, 0.1], ramp: 0.5, hold: 1 } },
+  { name: "grab: skirt jersey, hem lifted", garment: "skirt.femme", textile: "jersey", mode: "cpu", duration: 7.5, grab: { where: "hem", at: 3, pull: [0.2, 0.3, 0.1], ramp: 0.5, hold: 1 } },
   { name: "grab: cape wool, hem pulled away", garment: "cape", textile: "wool", mode: "cpu", duration: 9.5, grab: { where: "hem", at: 5, pull: [0.3, 0.3, 0.4], ramp: 0.6, hold: 1 } },
   { name: "grab: tshirt jersey, hem lifted (gpu preset)", garment: "tshirt", textile: "jersey", mode: "gpu", duration: 7.5, grab: { where: "hem", at: 3, pull: [0.1, 0.2, 0.15], ramp: 0.5, hold: 1 } },
   // Folded up against the body, to the chest: the layers slide on each other under the hand.
@@ -51,7 +73,7 @@ const GRAB: Scenario[] = [
 const FULL: Scenario[] = [
   { name: "tshirt denim rest (gpu preset)", garment: "tshirt", textile: "denim", mode: "gpu", duration: 5 },
   { name: "tshirt jersey walk (gpu preset)", garment: "tshirt", textile: "jersey", mode: "gpu", duration: 7, walk: true },
-  { name: "skirt jersey walk (gpu preset)", garment: "skirt", textile: "jersey", mode: "gpu", duration: 7, walk: true },
+  { name: "skirt jersey walk (gpu preset)", garment: "skirt.femme", textile: "jersey", mode: "gpu", duration: 7, walk: true },
 ];
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -67,12 +89,18 @@ const scenarios = [...(flag("grab") ? GRAB : QUICK), ...(flag("full") ? FULL : [
 /** Settings of the hold (lib/sim/grab.ts GRAB) for the --grab scenarios, e.g. --hold '{"force":1.5}'. */
 Object.assign(HOLD, JSON.parse(option("hold") ?? "{}"));
 
-const body = loadBody(root);
+/** One mannequin per set of parameters. */
+const bodies = new Map<string, ReturnType<typeof loadBody>>();
+const bodyOf = (sc: Scenario) => {
+  const key = JSON.stringify(sc.phenotype ?? {});
+  if (!bodies.has(key)) bodies.set(key, loadBody(root, sc.phenotype));
+  return bodies.get(key)!;
+};
 const results: Result[] = [];
 for (const sc of scenarios) {
   const t0 = performance.now();
   process.stdout.write(`${sc.name}…${flag("verbose") ? "\n" : " "}`);
-  const r = runScenario(body, sc, flag("verbose") ? (l) => console.log(l) : undefined);
+  const r = runScenario(bodyOf(sc), sc, flag("verbose") ? (l) => console.log(l) : undefined);
   results.push(r);
   console.log(`${((performance.now() - t0) / 1000).toFixed(0)} s`);
 }
@@ -89,6 +117,9 @@ const columns: [string, (r: Result) => number | string, number?][] = [
   ["cross max", (r) => r.crossings.max],
   ["pen verts", (r) => r.penetration.count],
   ["pen mm", (r) => r.penetration.depth, 1],
+  ["skin through", (r) => r.skinThrough?.end ?? 0],
+  ["skin thr. max", (r) => r.skinThrough?.max ?? 0],
+  ["skin thr. mm", (r) => r.skinThrough?.depth ?? 0, 1],
   ["limbs through %", (r) => r.limbsThrough?.samples ?? 0],
   ["drop cm", (r) => r.drop, 1],
   ["above floor cm", (r) => r.aboveFloor, 2],

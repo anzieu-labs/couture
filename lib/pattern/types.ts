@@ -29,6 +29,11 @@ export interface BodyMeasures {
   /** Vertical distances from the natural waist (narrowest girth) to the fullest hip and to the knee. */
   waistToHip: number;
   waistToKnee: number;
+  /** Vertical distances HPS → natural waist, and natural waist → floor. */
+  hpsToWaist: number;
+  waistToFloor: number;
+  /** Shoulder joint → elbow → wrist, along the arm. */
+  armLength: number;
 }
 
 /** Garment kinds (also selects the 3D placement before sewing). */
@@ -93,7 +98,48 @@ export interface Seam {
  */
 export interface Band {
   edges: { piece: PieceId; edge: string }[];
-  /** Elasticity: how far the band may stretch beyond the edges' length (0.1: 10 %; 0: rigid). */
+  /**
+   * Elasticity: how far the band may stretch beyond the edges' length (0.1: 10 %; 0: rigid).
+   * Negative: the band is that much shorter than the edges, which gather on it.
+   */
+  stretch: number;
+}
+
+/**
+ * A point of a piece, told from its outline: an edge, the fraction `t` of its length (in loop
+ * order) and, from there, an offset in the edge's own frame (cm: along the edge, then towards
+ * the inside of the piece). Told that way it follows the piece when the pattern is edited or
+ * the morphology changes — the corner of a neckline stays the corner of the neckline.
+ * See lib/pattern/clasp.ts.
+ */
+export interface PiecePoint {
+  piece: PieceId;
+  edge: string;
+  t: number;
+  offset: P2;
+}
+
+/**
+ * A clasp: two points of the garment fastened together when it is put on (a cape closed at
+ * the neck). Sewn like a single stitch: the points are brought together with the seams.
+ */
+export interface Clasp {
+  a: PiecePoint;
+  b: PiecePoint;
+}
+
+/**
+ * A belt: an elastic sewn along a free edge of the garment — a waist, a hem, a neckline — and
+ * all the way round it, through the seams (lib/pattern/belt.ts). Told by one of the edges it
+ * runs along and by its elasticity; it becomes a band (Band) of the pattern.
+ */
+export interface Belt {
+  piece: PieceId;
+  edge: string;
+  /**
+   * How far the belt may stretch beyond the length of its edges (0.1: 10 %; 0: rigid, a
+   * waistband) or, negative, how much shorter than them it is: the cloth gathers on it.
+   */
   stretch: number;
 }
 
@@ -134,6 +180,8 @@ export interface Pattern {
   seams: Seam[];
   /** Edges held to their length by a band (waistband). */
   bands?: Band[];
+  /** Clasps added on the pattern (the 2D editor's tool). */
+  clasps?: readonly Clasp[];
   /** Editable points (all pieces). */
   handles: Handle[];
   /** Key dimensions, for display (cm). */

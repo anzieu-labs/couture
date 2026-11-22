@@ -12,6 +12,7 @@ import { buildSelfCollision, type SelfCollisionModel } from "./selfCollision";
  *    (3B / (A0 + A1)) · |Σ Kᵢ xᵢ|², with constant cotangent weights Kᵢ: a
  *    linear, singularity-free constraint driven by the bending rigidity B (N·m);
  *  - sewing: seam vertex pairs pulled together, rest length ramping to 0;
+ *  - clasps: vertex pairs fastened once the garment is on (see CLASP);
  *  - self-collisions: see selfCollision.ts.
  *
  * Each constraint family is graph-coloured (no two constraints of a colour share
@@ -103,6 +104,17 @@ export function tensileModuli(p: ClothParams): { warp: number; weft: number } {
   };
 }
 
+/**
+ * Clasps (pattern/types.ts Clasp) are fastened as one does: the garment is put on first — sewn,
+ * left to fall for `delay` s — then the two points are brought together and held: they may
+ * not be further apart than a distance that comes down from `reach` (m) to 0 at `speed` (m/s),
+ * so that wherever they are, they are met without a jolt. Closed with the seams instead, a
+ * cape's neckline was already a ring when it came down from where it is laid, at the height
+ * of the chin: one time in two it closed over the chin and stayed hooked on it, the whole
+ * cape hanging from the head.
+ */
+export const CLASP = { delay: 1.5, reach: 0.6, speed: 0.5 };
+
 /** [start, count] of each colour in a colour-sorted constraint array. */
 export type ColorRanges = [number, number][];
 
@@ -119,9 +131,13 @@ export interface ClothModel {
   bendK: Float32Array;
   bendCompliance: Float32Array;
   bendColors: ColorRanges;
+  /** Stitched pairs: the seams' and the clasps'. */
   seams: Uint32Array;
+  /** Distance of each pair before sewing (m); negative: a clasp, fastened later (CLASP). */
   seamStart: Float32Array;
   seamColors: ColorRanges;
+  /** Simulated time from which the garment is all put together: its seams closed, its clasps fastened (s). */
+  fastenedAt: number;
   /** 1 for vertices on a seam (they may cross the body while sewing). */
   onSeam: Uint32Array;
   triangles: Uint32Array;
@@ -143,10 +159,16 @@ export interface ClothModel {
  * instead concentrates the correction on the kinks of the polyline, and tears it.)
  */
 export interface BandModel {
-  /** Per band: first segment, segment count, first vertex, vertex count. */
+  /**
+   * Per band: first segment, segment count, first vertex, vertex count. A band shorter than its
+   * edges has no segment: what is held is the way round its vertices, not the length of cloth
+   * between them (BELT).
+   */
   ranges: Uint32Array;
-  /** Longest each band may get (m): its length on the pattern, plus its elasticity. */
+  /** Longest each band may get (m): its length on the pattern, plus its elasticity (less, when it gathers the cloth). */
   rest: Float32Array;
+  /** Length each band has on the pattern (m): where one that gathers starts from as it is drawn in (bandLimit); `rest` for the others. */
+  from: Float32Array;
   /** Segments, as pairs of vertices. */
   segments: Uint32Array;
   /** Vertices of each band. */
@@ -154,18 +176,46 @@ export interface BandModel {
 }
 
 function buildBands(mesh: GarmentMesh): BandModel {
-  const ranges: number[] = [], rest: number[] = [], segments: number[] = [], vertices: number[] = [];
+  const ranges: number[] = [], rest: number[] = [], from: number[] = [], segments: number[] = [], vertices: number[] = [];
   for (const { segments: pairs, stretch } of mesh.bands ?? []) {
     const own = [...new Set(pairs)];
-    ranges.push(segments.length / 2, pairs.length / 2, vertices.length, own.length);
+    const gathers = stretch < 0;
+    ranges.push(segments.length / 2, gathers ? 0 : pairs.length / 2, vertices.length, own.length);
     let length = 0;
     for (let i = 0; i < pairs.length; i += 2)
       length += Math.hypot(mesh.rest[2 * pairs[i]] - mesh.rest[2 * pairs[i + 1]], mesh.rest[2 * pairs[i] + 1] - mesh.rest[2 * pairs[i + 1] + 1]);
-    segments.push(...pairs);
+    if (!gathers) segments.push(...pairs);
     vertices.push(...own);
     rest.push(length * (1 + stretch));
+    from.push(gathers ? length : rest[rest.length - 1]);
   }
-  return { ranges: Uint32Array.from(ranges), rest: Float32Array.from(rest), segments: Uint32Array.from(segments), vertices: Uint32Array.from(vertices) };
+  return { ranges: Uint32Array.from(ranges), rest: Float32Array.from(rest), from: Float32Array.from(from), segments: Uint32Array.from(segments), vertices: Uint32Array.from(vertices) };
+}
+
+/**
+ * A band shorter than the edges it is sewn along — an elastic that gathers them (a belt with a
+ * negative elasticity, pattern/types.ts Belt) — is drawn in as a clasp is fastened (CLASP), once
+ * the garment is on: sewn, left to fall for `delay` s, then from the length of its edges to its
+ * own at `speed` (m of band per second). Drawn in at once, one 25 cm shorter than a t-shirt is
+ * wide moves its cloth by 4 cm in the first substep.
+ *
+ * It holds the way round the cloth, not the cloth: on it the cloth gathers, and the length of
+ * cloth along the edge stays what it was (held to the band's length as a waistband's is, the
+ * edge was crushed against the stretch constraints — 150 % of strain, and no shorter round).
+ * The way round is measured on the outermost vertex of each of `sectors` directions about the
+ * centre of the band's vertices, seen from above (the body stands, and a waist or a hem lies
+ * level: a sleeve's hem, on a hanging arm, nearly so); longer than the band, they are drawn
+ * towards their centre, level, by the ratio.
+ */
+export const BELT = { delay: 1.5, speed: 0.25, sectors: 32 };
+
+/**
+ * Longest a band may be at a time (m): its rest length; for one that gathers, the length of
+ * its edges until it is drawn in (it holds from the start: a skirt whose waist held nothing
+ * for a second and a half was on the knees by then), then on its way to its own (BELT).
+ */
+export function bandLimit(bands: BandModel, b: number, p: ClothParams, time: number): number {
+  return Math.max(bands.rest[b], bands.from[b] - BELT.speed * Math.max(0, time - p.sewTime - BELT.delay));
 }
 
 /**
@@ -278,12 +328,18 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
   }
 
   const seamStart = new Float32Array(mesh.seams.length / 2);
+  // The clasps are the last pairs (pattern/mesh.ts).
+  const sewn = seamStart.length - (mesh.clasps?.length ?? 0) / 2;
+  const onSeam = new Uint32Array(n);
   for (let s = 0; s < seamStart.length; s++) {
     const a = mesh.seams[2 * s], b = mesh.seams[2 * s + 1];
+    if (s >= sewn) {
+      seamStart[s] = -1;
+      continue;
+    }
     seamStart[s] = Math.hypot(initial[3 * a] - initial[3 * b], initial[3 * a + 1] - initial[3 * b + 1], initial[3 * a + 2] - initial[3 * b + 2]);
+    onSeam[a] = onSeam[b] = 1;
   }
-  const onSeam = new Uint32Array(n);
-  for (const v of mesh.seams) onSeam[v] = 1;
 
   const E = Uint32Array.from(edges), B = Uint32Array.from(bIdx);
   const maxEdge = rest.reduce((m, l) => Math.max(m, l), 0);
@@ -292,6 +348,7 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
   const ec = colorConstraints(E, 2, n);
   const bc = colorConstraints(B, 4, n);
   const sc = colorConstraints(mesh.seams, 2, n);
+  const bands = buildBands(mesh);
   return {
     params: p,
     vertexCount: n,
@@ -307,10 +364,11 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
     seams: permute(Uint32Array.from(mesh.seams), sc.order, 2),
     seamStart: permute(seamStart, sc.order, 1),
     seamColors: sc.ranges,
+    fastenedAt: p.sewTime + Math.max(sewn < seamStart.length ? CLASP.delay + CLASP.reach / CLASP.speed : 0, ...Array.from(bands.rest, (r, b) => (bands.from[b] > r ? BELT.delay + (bands.from[b] - r) / BELT.speed : 0))),
     onSeam,
     triangles: tri,
     self,
-    bands: buildBands(mesh),
+    bands,
   };
 }
 
@@ -333,6 +391,8 @@ export function substepState(p: ClothParams, time: number) {
     /** Seam rest length factor: 1 → 0 while sewing. */
     sewK: Math.max(0, 1 - time / p.sewTime),
     sewing: time < p.sewTime,
+    /** Largest distance left between the two points of a clasp (m; CLASP): Infinity until they are fastened, then down to 0. */
+    claspGoal: time >= p.sewTime + CLASP.delay ? Math.max(0, CLASP.reach - CLASP.speed * (time - p.sewTime - CLASP.delay)) : Infinity,
   };
 }
 
@@ -363,12 +423,26 @@ export function sweepPlan(p: ClothParams, substep: number, assembling: boolean):
   return Array.from({ length: stretch }, (_, i) => ({ reverse: (i + (bend % 2 ? substep : 0)) % 2 === 1, bending: i < bend }));
 }
 
+/**
+ * When the cloth is at rest, and the simulation stops: when none of its points goes anywhere
+ * any more — the fastest one under `speed` (m/s; 4 mm/s is a pixel in several seconds on the
+ * screen) over `windows` stretches of `window` s in a row on the GPU, or over as many frames
+ * on the CPU (RestDetector). Counted from where the points get to, not from the solver's
+ * velocities, which never go to zero. A fold that keeps creeping never passes: `patience` s
+ * after the body or the hand last moved, or half as long again as the garment's own duration
+ * while it is put on, the simulation stops anyway.
+ */
+export const REST = { speed: 0.004, window: 0.25, windows: 2, patience: 8, overtime: 1.5 };
+
+/** Simulated time at which a garment stops whether at rest or not (REST). */
+export const restDeadline = (duration: number, movedAt: number) => Math.max(REST.overtime * duration, movedAt + REST.patience);
+
 /** Stops the simulation once the cloth has come to rest after sewing. */
 export class RestDetector {
   private still = 0;
   private last: Float32Array | null = null;
 
-  constructor(private readonly speed = 0.004, private readonly frames = 20) {}
+  constructor(private readonly speed = REST.speed, private readonly frames = Math.round(REST.windows * REST.window * 60)) {}
 
   /** Feed positions sampled `dt` seconds apart; returns true once at rest. */
   update(pos: Float32Array, dt: number, armed: boolean): boolean {

@@ -63,20 +63,18 @@ function scan(slicer: MeshSlicer, y0: number, y1: number, mode: "max" | "min", s
   return Number.isFinite(best) ? best : 0;
 }
 
-export function measureBody(
-  shape: BodyShape,
-  idx: ArrayLike<number>,
-  slicer = new MeshSlicer(shape.positions, idx),
-): BodyMeasurement {
-  const { positions: pos, joints: j } = shape;
-  const y = (k: string) => j[k][1];
-  const shoulderY = (y("upperarm01.L") + y("upperarm01.R")) / 2;
-  const hipJoint = (y("upperleg01.L") + y("upperleg01.R")) / 2;
+type Joints = BodyShape["joints"];
 
-  // Bust: scan upwards and stop when the section suddenly widens — the arms
-  // have joined the torso loop (armpit level); any girth above would include them.
+/** Height of the hip joints (m). */
+export const hipJointY = (j: Joints) => (j["upperleg01.L"][1] + j["upperleg01.R"][1]) / 2;
+
+/** Section at bust level — the fullest one under the arms — and the height of the armpits. */
+export function chestSection(slicer: MeshSlicer, j: Joints): { chest: TorsoSection; armpitY: number } {
+  const shoulderY = (j["upperarm01.L"][1] + j["upperarm01.R"][1]) / 2;
+  // Scan upwards and stop when the section suddenly widens — the arms have joined the
+  // torso loop (armpit level); any girth above would include them.
   let chest = EMPTY, armpitY = shoulderY - 0.08, prevHalfWidth = 0;
-  const steps = 24, y0 = y("spine02");
+  const steps = 24, y0 = j["spine02"][1];
   for (let s = 0; s <= steps; s++) {
     const yy = y0 + ((shoulderY - y0) * s) / steps;
     const sec = torsoSection(slicer, yy);
@@ -86,12 +84,26 @@ export function measureBody(
     armpitY = yy;
     if (sec.girth > chest.girth) chest = sec;
   }
+  return { chest, armpitY };
+}
 
+/** Waist girth (m): the narrowest between the spine joints around it. */
+export const waistGirth = (slicer: MeshSlicer, j: Joints) => scan(slicer, j["spine04"][1], j["spine02"][1], "min");
+
+/** Hip girth (m): the fullest around the hip joints. */
+export const hipsGirth = (slicer: MeshSlicer, j: Joints) => scan(slicer, hipJointY(j) - 0.15, j["spine05"][1] + 0.02, "max");
+
+export function measureBody(
+  shape: BodyShape,
+  idx: ArrayLike<number>,
+  slicer = new MeshSlicer(shape.positions, idx),
+): BodyMeasurement {
+  const { chest, armpitY } = chestSection(slicer, shape.joints);
   return {
-    stature: AnnyModel.stature(pos) * 100,
+    stature: AnnyModel.stature(shape.positions) * 100,
     bust: chest.girth * 100,
-    waist: scan(slicer, y("spine04"), y("spine02"), "min") * 100,
-    hips: scan(slicer, hipJoint - 0.15, y("spine05") + 0.02, "max") * 100,
+    waist: waistGirth(slicer, shape.joints) * 100,
+    hips: hipsGirth(slicer, shape.joints) * 100,
     armpitY,
     chest,
   };

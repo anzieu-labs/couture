@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { TorsoFrame } from "@/lib/avatar/bodyMeasures";
 import type { BodyMeasurement } from "@/lib/avatar/measure";
+import { withBelts } from "@/lib/pattern/belt";
+import { validClasps } from "@/lib/pattern/clasp";
 import { GARMENTS, garmentDef, type GarmentParams } from "@/lib/pattern/garments";
-import { NO_EDITS, type BodyMeasures, type GarmentKind, type PatternEdits } from "@/lib/pattern/types";
+import { NO_EDITS, type Belt, type BodyMeasures, type Clasp, type PatternEdits } from "@/lib/pattern/types";
 import { patternIssues } from "@/lib/pattern/validate";
 import type { Textile } from "@/lib/textiles/catalog";
 import type { GarmentViewer } from "@/lib/viewer/GarmentViewer";
@@ -12,26 +14,46 @@ import type { GarmentViewer } from "@/lib/viewer/GarmentViewer";
 const DRESS_DELAY = 250;
 const HISTORY = 100;
 
-interface History {
-  past: PatternEdits[];
-  present: PatternEdits;
-  future: PatternEdits[];
+/** What the user changed on a drafted pattern: its points moved, and the accessories added (clasps, belts). */
+interface Changes {
+  edits: PatternEdits;
+  clasps: readonly Clasp[];
+  belts: readonly Belt[];
 }
 
-const EMPTY: History = { past: [], present: NO_EDITS, future: [] };
+interface History {
+  past: Changes[];
+  present: Changes;
+  future: Changes[];
+}
 
-/** Pattern edits with undo / redo, one history per garment. */
-function useEditHistory(kind: GarmentKind) {
-  const [all, setAll] = useState<Partial<Record<GarmentKind, History>>>({});
-  const h = all[kind] ?? EMPTY;
+const NO_CLASPS: readonly Clasp[] = [];
+const NO_BELTS: readonly Belt[] = [];
+/** Where each garment's history starts: the draft as it is, with the accessories the garment comes with. */
+const INITIAL = Object.fromEntries(
+  GARMENTS.map((g) => [g.id, { past: [], present: { edits: NO_EDITS, clasps: g.clasps ?? NO_CLASPS, belts: g.belts ?? NO_BELTS }, future: [] }]),
+) as Record<string, History>;
+
+/** Pattern edits and clasps with undo / redo, one history per garment. */
+function useEditHistory(kind: string) {
+  const [all, setAll] = useState<Partial<Record<string, History>>>({});
+  const h = all[kind] ?? INITIAL[kind];
   const update = useCallback(
-    (f: (s: History) => History) => setAll((a) => ({ ...a, [kind]: f(a[kind] ?? EMPTY) })),
+    (f: (s: History) => History) => setAll((a) => ({ ...a, [kind]: f(a[kind] ?? INITIAL[kind]) })),
     [kind],
   );
-  const commit = useCallback(
-    (next: PatternEdits) => update((s) => (next === s.present ? s : { past: [...s.past, s.present].slice(-HISTORY), present: next, future: [] })),
+  const change = useCallback(
+    (next: Partial<Changes>) =>
+      update((s) =>
+        (next.edits ?? s.present.edits) === s.present.edits && (next.clasps ?? s.present.clasps) === s.present.clasps && (next.belts ?? s.present.belts) === s.present.belts
+          ? s
+          : { past: [...s.past, s.present].slice(-HISTORY), present: { ...s.present, ...next }, future: [] },
+      ),
     [update],
   );
+  const commit = useCallback((edits: PatternEdits) => change({ edits }), [change]);
+  const commitClasps = useCallback((clasps: readonly Clasp[]) => change({ clasps }), [change]);
+  const commitBelts = useCallback((belts: readonly Belt[]) => change({ belts }), [change]);
   const undo = useCallback(
     () => update((s) => (s.past.length ? { past: s.past.slice(0, -1), present: s.past[s.past.length - 1], future: [s.present, ...s.future] } : s)),
     [update],
@@ -40,7 +62,7 @@ function useEditHistory(kind: GarmentKind) {
     () => update((s) => (s.future.length ? { past: [...s.past, s.present], present: s.future[0], future: s.future.slice(1) } : s)),
     [update],
   );
-  return { edits: h.present, commit, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
+  return { edits: h.present.edits, clasps: h.present.clasps, belts: h.present.belts, commit, commitClasps, commitBelts, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
 }
 
 /** Pattern drafted from the measured body (+ edits), then sewn & draped with the textile's mechanics. */
@@ -50,15 +72,13 @@ export function useGarment(
   measurements: BodyMeasurement | null,
   textile: Textile,
 ) {
-  const [kind, setKind] = useState<GarmentKind>("tshirt");
-  const [allParams, setAllParams] = useState<Record<GarmentKind, GarmentParams>>(
-    () => Object.fromEntries(GARMENTS.map((g) => [g.id, g.defaults])) as Record<GarmentKind, GarmentParams>,
-  );
+  // The garment's id (lib/pattern/garments.ts): a style in one of its cuts.
+  const [kind, setKind] = useState(GARMENTS[0].id);
+  const [allParams, setAllParams] = useState<Record<string, GarmentParams>>(() => Object.fromEntries(GARMENTS.map((g) => [g.id, g.defaults])));
   const garment = garmentDef(kind);
   const params = allParams[kind];
   const setParams = useCallback((p: GarmentParams) => setAllParams((a) => ({ ...a, [kind]: p })), [kind]);
   const [measures, setMeasures] = useState<BodyMeasures | null>(null);
-  const [sewCount, setSewCount] = useState(0);
   const torso = useRef<TorsoFrame | null>(null);
   const history = useEditHistory(kind);
 
@@ -71,7 +91,13 @@ export function useGarment(
     setMeasures(inputs.measures);
   }, [ready, measurements, viewerRef]);
 
-  const pattern = useMemo(() => (measures ? garment.draft(measures, params, history.edits) : null), [garment, measures, params, history.edits]);
+  const pattern = useMemo(() => {
+    if (!measures) return null;
+    const drafted = garment.draft(measures, params, history.edits);
+    // The accessories the user added, those that still hold on the pattern as it is now.
+    const clasps = validClasps(drafted, history.clasps);
+    return withBelts(clasps.length ? { ...drafted, clasps } : drafted, history.belts);
+  }, [garment, measures, params, history.edits, history.clasps, history.belts]);
   const issues = useMemo(() => (pattern ? patternIssues(pattern) : []), [pattern]);
   // The 3D keeps the last pattern that can be meshed.
   const [sewn, setSewn] = useState(pattern);
@@ -93,7 +119,7 @@ export function useGarment(
       });
     }, DRESS_DELAY);
     return () => clearTimeout(timer);
-  }, [ready, sewn, weight, bending, stretch, thickness, friction, sewCount, viewerRef]);
+  }, [ready, sewn, weight, bending, stretch, thickness, friction, viewerRef]);
 
   return {
     kind,
@@ -104,7 +130,6 @@ export function useGarment(
     measures,
     pattern,
     issues,
-    resew: () => setSewCount((c) => c + 1),
     ...history,
   };
 }

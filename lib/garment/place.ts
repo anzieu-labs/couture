@@ -132,12 +132,42 @@ function placeTShirt(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Fl
 }
 
 /**
+ * Second step of the placement, once the body's distance field is there to tell its inside
+ * from its outside (prepare.ts builds it around the garment as placeGarment leaves it).
+ *
+ * A cape is laid flat above everything it could cut through, which puts it level with the
+ * chin: left there, its neckline came down onto the jaw and stayed hooked on the chin, the
+ * hood pulled over the face — a neckline is shorter than the way round chin and nape. It is
+ * worn round the neck, under the chin: the disc is brought down to the height, from just above
+ * the shoulder line, where the fewest of its points start inside the body (the lowest of them;
+ * a few always do, by a few millimetres: the throat is not as round as the neckline), and the
+ * hood comes down with it.
+ */
+export function seatGarment(mesh: GarmentMesh, placed: Float32Array, torso: TorsoFrame, kind: GarmentKind, body: { sample(x: number, y: number, z: number): number }) {
+  if (kind !== "cape") return;
+  const n = placed.length / 3;
+  const disc: number[] = [];
+  for (let i = 0; i < n; i++) if (!mesh.pieceIds[mesh.piece[i]].startsWith("hood")) disc.push(3 * i);
+  const laid = placed[disc[0] + 1];
+  let seat = laid, fewest = Infinity;
+  for (let y = torso.hpsY + CAPE_SEAT.lowest; y < laid; y += CAPE_SEAT.step) {
+    let inside = 0;
+    for (const o of disc) if (body.sample(placed[o], y, placed[o + 2]) < 0) inside++;
+    if (inside < fewest) [fewest, seat] = [inside, y];
+  }
+  for (let o = 1; o < placed.length; o += 3) placed[o] += seat - laid;
+}
+
+/** Heights tried for the disc of a cape (seatGarment): from `lowest` above the HPS up to where it is laid, every `step` (m). */
+const CAPE_SEAT = { lowest: 0.005, step: 0.005 };
+
+/**
  * Cape (lib/pattern/cape.ts): the full circle is flat, so it is laid horizontally
- * around the neck, just above the highest point of the shoulders under it, with
- * no distortion: the circle's centre (pattern origin) on the neck axis, the back
- * towards −z, the fronts towards +z. Gravity drapes it once sewn. The hood halves
- * stand in vertical planes on either side of the head, face edge at the front:
- * sewing closes the back seam over the head and joins the neck edge to the cape.
+ * around the neck, above the highest point of the body under it bar the head (seatGarment
+ * then brings it down round the neck), with no distortion: the circle's centre (pattern
+ * origin) on the neck axis, the back towards −z, the fronts towards +z. Gravity drapes it
+ * once sewn. The hood halves stand in vertical planes on either side of the head, face edge
+ * at the front: sewing closes the back seam over the head and joins the neck edge to the cape.
  */
 function placeCape(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Float32Array {
   const n = mesh.rest.length / 2;

@@ -1,5 +1,6 @@
 import Constrainautor from "@kninnug/constrainautor";
 import Delaunator from "delaunator";
+import { piecePointPosition } from "./clasp";
 import { polylineLength, resample, type P2 } from "./curves";
 import type { Pattern, PieceId } from "./types";
 
@@ -7,7 +8,8 @@ import type { Pattern, PieceId } from "./types";
  * Turns a pattern into a simulation mesh: every piece is sampled at ~`spacing`
  * cm (seam edges get the same count on both sides so they can be stitched
  * vertex to vertex), filled with a hexagonal point grid and triangulated with
- * a constrained Delaunay triangulation (Delaunator + Constrainautor).
+ * a constrained Delaunay triangulation (Delaunator + Constrainautor). A clasp
+ * (Pattern.clasps) is one more stitch, between the vertices nearest to its two ends.
  */
 
 export interface GarmentMesh {
@@ -19,8 +21,10 @@ export interface GarmentMesh {
   pieceIds: PieceId[];
   /** Mesh vertices along each pattern edge, in loop order (both end points included). */
   edges: { piece: PieceId; edge: string; vertices: Uint32Array }[];
-  /** Stitched vertex pairs. */
+  /** Stitched vertex pairs: the seams, then the clasps. */
   seams: Uint32Array;
+  /** The clasps' vertex pairs (the last ones of `seams`). */
+  clasps: Uint32Array;
   /** Bands (Pattern.bands): the mesh edges along each, as vertex pairs, and its elasticity. */
   bands: { segments: Uint32Array; stretch: number }[];
 }
@@ -175,7 +179,26 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
     for (let i = 0; i < va.length; i++) seams.push(va[i], vb[i]);
   }
 
-  // 5. Bands: the boundary edges along their pattern edges.
+  // 5. Clasps: one more stitch each, between the mesh vertices nearest to their ends (a corner
+  // of a piece is a vertex; elsewhere the end is off by half the mesh spacing at most).
+  const clasps: number[] = [];
+  for (const clasp of pattern.clasps ?? []) {
+    const ends = [clasp.a, clasp.b].map((end) => {
+      const at = piecePointPosition(pattern, end);
+      const piece = pattern.pieces.findIndex((p) => p.id === end.piece);
+      let best = -1, bestD = Infinity;
+      if (at)
+        for (let v = 0; v < pieceOf.length; v++) {
+          if (pieceOf[v] !== piece) continue;
+          const d = Math.hypot(rest[2 * v] * 100 - at[0], rest[2 * v + 1] * 100 - at[1]);
+          if (d < bestD) [bestD, best] = [d, v];
+        }
+      return best;
+    });
+    if (ends[0] >= 0 && ends[1] >= 0 && ends[0] !== ends[1]) clasps.push(ends[0], ends[1]);
+  }
+
+  // 6. Bands: the boundary edges along their pattern edges.
   const bands = (pattern.bands ?? []).map((band) => {
     const pairs: number[] = [];
     for (const { piece, edge } of band.edges) {
@@ -191,7 +214,8 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
     piece: Uint8Array.from(pieceOf),
     pieceIds: pattern.pieces.map((p) => p.id),
     edges: pattern.pieces.flatMap((p) => p.edges.map((e) => ({ piece: p.id, edge: e.id, vertices: Uint32Array.from(edgeVerts.get(key(p.id, e.id))!) }))),
-    seams: new Uint32Array(seams),
+    seams: new Uint32Array([...seams, ...clasps]),
+    clasps: new Uint32Array(clasps),
     bands,
   };
 }

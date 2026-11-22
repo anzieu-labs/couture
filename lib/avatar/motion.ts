@@ -1,5 +1,6 @@
+import type { SkinWeights } from "./anny";
 import { armIK, restPole } from "./armIK";
-import { axisAngle, identityBones, type Mat3, mul3, type Pose, rotX, rotY, rotZ, type Skeleton, type Vec3 } from "./skeleton";
+import { axisAngle, BONE_STRIDE, composeBones, identityBones, invertBones, type Mat3, mul3, type Pose, rotX, rotY, rotZ, type Skeleton, skinVertices, type Vec3 } from "./skeleton";
 
 /**
  * Mannequin motions, as a deterministic function of time (the same timeline
@@ -29,6 +30,16 @@ import { axisAngle, identityBones, type Mat3, mul3, type Pose, rotX, rotY, rotZ,
  * legs stay vertical, the thorax upright), a small weight shift over the stance
  * foot (the feet staying put), counter-rotation of the thorax and arm swing.
  * Times are seconds on the caller's clock.
+ *
+ * Reference pose: the body as it stands (arms along the body, nothing else), not the
+ * morphology's own rest pose (an A-pose, only measured and skinned from). The bone transforms
+ * handed out (Animator.sample) go from the standing pose to the pose at time t, and
+ * `standingBody` gives the vertices and joints they apply to. Standing still, they are the
+ * identity: the body shown is then exactly the one the cloth collides with. Cloth collisions
+ * are solved in that reference pose (lib/sim/posedBody.ts), by an approximation that grows
+ * with how far the bones have moved from it — solved in the A-pose, the cloth lying on the
+ * shoulders of the standing mannequin was up to 7 mm off the skin as shown, on either side
+ * of it: the skin showed through.
  */
 
 /**
@@ -36,8 +47,6 @@ import { axisAngle, identityBones, type Mat3, mul3, type Pose, rotX, rotY, rotZ,
  * fallen onto the body and self-collisions are on (sim/model.ts SELF_DELAY) (s).
  */
 export const MOTION_DELAY = 0.8;
-/** Simulated time left to the cloth to settle once the body stops (s). */
-export const SETTLE_TIME = 3;
 
 const DEG = Math.PI / 180;
 export type Side = "L" | "R";
@@ -250,6 +259,13 @@ export class Animator {
   private legs = {} as Record<"L" | "R", Leg>;
   /** Arm spread of the rest pose (degrees from the body). */
   restArmSpread = 40;
+  /**
+   * The pose the mannequin stands in (arms along the body), as bone transforms from the
+   * morphology's rest pose: the reference of the transforms `sample` gives (see `standingBody`).
+   */
+  standing: Float32Array = new Float32Array(0);
+  /** From the standing pose back to the rest pose. */
+  private fromStanding: Float64Array = new Float64Array(0);
 
   constructor(private skel: Skeleton) {
     this.skeleton = skel;
@@ -276,6 +292,10 @@ export class Animator {
     this.restArmSpread = spread;
     const lowered = (spread - ARM_SPREAD) * DEG;
     this.arms = { from: lowered, to: lowered, start: -Infinity };
+    const rot: (Mat3 | null)[] = new Array(s.count).fill(null);
+    this.lowerArms(rot, lowered);
+    this.standing = s.pose({ rotations: rot, ground: null }, new Float32Array(s.count * BONE_STRIDE));
+    this.fromStanding = invertBones(this.standing);
     for (const side of ["L", "R"] as const) {
       const hip = s.head(`upperleg01.${side}`), knee = s.head(`lowerleg01.${side}`), ankle = s.head(`foot.${side}`);
       const sole = s.soles.find((x) => x.label === `foot.${side}`);
@@ -291,6 +311,24 @@ export class Animator {
         out: 0,
       };
       this.legs[side].out = Math.asin(clamp01((Math.abs(ankle[0]) - Math.abs(hip[0])) / this.legs[side].length));
+    }
+  }
+
+  /**
+   * Arms lowered from the rest pose by `adduction` (rad, in the frontal plane: applied before
+   * any rotation the upper arm already has), elbows relaxed in proportion (none when raised).
+   */
+  private lowerArms(rot: (Mat3 | null)[], adduction: number) {
+    const s = this.skel;
+    const lowest = (this.restArmSpread - ARM_SPREAD) * DEG;
+    const relax = lowest > 0 ? ELBOW_RELAX * clamp01(adduction / lowest) : 0;
+    for (const [side, sign] of [["L", 1], ["R", -1]] as const) {
+      const iu = s.index[`upperarm01.${side}`], il = s.index[`lowerarm01.${side}`];
+      if (adduction !== 0 && iu !== undefined) rot[iu] = rot[iu] ? mul3(rot[iu]!, rotZ(-sign * adduction)) : rotZ(-sign * adduction);
+      if (relax > 0 && il !== undefined) {
+        const r = axisAngle(this.elbowAxes[side], -relax);
+        rot[il] = rot[il] ? mul3(r, rot[il]!) : r;
+      }
     }
   }
 
@@ -516,8 +554,8 @@ export class Animator {
   }
 
   /**
-   * Bone transforms at time t into `out`. Returns false (identity transforms)
-   * when the body is at rest.
+   * Bone transforms at time t into `out`, from the standing pose (see the header: they apply
+   * to `standingBody`). Returns false (identity transforms) when the body stands still.
    */
   sample(t: number, out: Float32Array): boolean {
     const s = this.skel;
@@ -525,7 +563,7 @@ export class Animator {
     const driven = { L: this.wristTarget("L", t), R: this.wristTarget("R", t) };
     const posture = this.postureAt(t);
     const held = posture.sit + posture.squat;
-    if (!this.moving(t) && adduction === 0 && !driven.L && !driven.R && held === 0) {
+    if (!this.moving(t) && adduction === this.arms.to && !driven.L && !driven.R && held === 0) {
       identityBones(s.count, out);
       return false;
     }
@@ -653,12 +691,7 @@ export class Animator {
     }
 
     // Arm spread, before the swing (rotation about Z: towards the body).
-    if (adduction !== 0)
-      for (const [side, sign] of [["L", 1], ["R", -1]] as const) {
-        const i = s.index[`upperarm01.${side}`];
-        if (i !== undefined) rot[i] = rot[i] ? mul3(rot[i]!, rotZ(-sign * adduction)) : rotZ(-sign * adduction);
-      }
-    if (relax > 0) for (const side of ["L", "R"] as const) set(`lowerarm01.${side}`, axisAngle(this.elbowAxes[side], -relax));
+    this.lowerArms(rot, adduction);
 
     // Driven hands: inverse kinematics replaces the spread and the swing of that arm.
     for (const side of ["L", "R"] as const) {
@@ -674,7 +707,29 @@ export class Animator {
     if (this.turn && t > this.turn.start && t < this.turnEnd)
       set("root", rotY(2 * Math.PI * smootherstep((t - this.turn.start) / TURN_TIME)));
 
-    s.pose({ rotations: rot, ground, offset }, out);
+    // From the rest pose (the skeleton's), brought back to the standing pose.
+    composeBones(s.pose({ rotations: rot, ground, offset }, out), this.fromStanding);
     return true;
   }
+}
+
+/**
+ * The body as it stands (see the header): the vertices, normals and joints of the morphology's
+ * rest pose brought to the standing pose — what the animator's bone transforms apply to, what
+ * is shown when the mannequin stands still, and what the cloth is placed around and collides with.
+ */
+export function standingBody(
+  animator: Animator,
+  rest: { positions: Float32Array; normals: Float32Array; joints: Record<string, Vec3> },
+  skin: SkinWeights,
+): { positions: Float32Array; normals: Float32Array; joints: Record<string, Vec3> } {
+  const bones = animator.standing;
+  const positions = new Float32Array(rest.positions.length), normals = new Float32Array(rest.normals.length);
+  skinVertices(rest.positions, rest.normals, skin, bones, positions, normals);
+  const joints = { ...rest.joints };
+  animator.skeleton.labels.forEach((label, k) => {
+    const [x, y, z] = rest.joints[label], o = k * BONE_STRIDE;
+    joints[label] = [0, 1, 2].map((r) => bones[o + 4 * r] * x + bones[o + 4 * r + 1] * y + bones[o + 4 * r + 2] * z + bones[o + 4 * r + 3]) as Vec3;
+  });
+  return { positions, normals, joints };
 }

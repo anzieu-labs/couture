@@ -1,9 +1,9 @@
 /// <reference lib="webworker" />
-import { Animator, MOTION_DELAY, SETTLE_TIME } from "../avatar/motion";
+import { Animator, MOTION_DELAY } from "../avatar/motion";
 import { BONE_STRIDE, Skeleton } from "../avatar/skeleton";
 import { CpuClothSolver } from "../sim/cloth";
 import { GRAB, selectGrab } from "../sim/grab";
-import { type ClothModel, type ClothParams, RestDetector, SELF_DELAY, tensileModuli } from "../sim/model";
+import { type ClothModel, type ClothParams, restDeadline, RestDetector, SELF_DELAY, tensileModuli } from "../sim/model";
 import { findTangles } from "../sim/untangle";
 import { prepareGarment } from "./prepare";
 import type { DressRequest, GarmentGeometry, GrabRequest, MotionRequest, WorkerRequest, WorkerResponse } from "./protocol";
@@ -50,7 +50,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function dress(req: DressRequest) {
   const { id, mode, body } = req;
-  const { mesh, initial, start, sdf, params, model } = prepareGarment(req);
+  const { mesh, initial, sdf, params, model } = prepareGarment(req);
   if (id !== current) return;
 
   const geometry: GarmentGeometry = {
@@ -58,7 +58,7 @@ async function dress(req: DressRequest) {
     triangles: mesh.triangles,
     thickness: params.thickness,
     tensile: tensileModuli(params),
-    initial: start,
+    initial,
     grabFrom: params.sewTime + SELF_DELAY,
     piece: mesh.piece,
     pieceIds: mesh.pieceIds,
@@ -67,7 +67,7 @@ async function dress(req: DressRequest) {
   if (mode === "gpu") {
     const grid = { data: sdf.data, skin: sdf.skin, nx: sdf.nx, ny: sdf.ny, nz: sdf.nz, min: sdf.min, h: sdf.h, limbs: sdf.limbs };
     gpuModel = { id, model };
-    post({ type: "model", id, model, sdf: grid, restPose: initial, ...geometry });
+    post({ type: "model", id, model, sdf: grid, ...geometry });
     return;
   }
 
@@ -84,7 +84,7 @@ async function dress(req: DressRequest) {
   if (req.motion.walking) animator.setWalking(true, 0);
   job = {
     id,
-    solver: new CpuClothSolver(model, initial, sdf, skeleton.count, start),
+    solver: new CpuClothSolver(model, initial, sdf, skeleton.count),
     model,
     params,
     animator,
@@ -131,9 +131,9 @@ async function run(j: Job) {
       j.rest.reset();
     }
     const positions = Float32Array.from(solver.pos);
-    const armed = t > params.sewTime + 0.5 && t > j.movedAt + 0.5;
+    const armed = t > j.model.fastenedAt + 0.5 && t > j.movedAt + 0.5;
     const atRest = j.rest.update(positions, frames * FRAME_DT, armed);
-    const done = !animator.pending(t) && !j.holding && (atRest || t >= Math.max(params.duration, j.movedAt + SETTLE_TIME));
+    const done = !animator.pending(t) && !j.holding && (atRest || t >= restDeadline(params.duration, j.movedAt));
     if (done || performance.now() - lastPost >= POST_INTERVAL_MS) {
       lastPost = performance.now();
       const posed = animator.sample(t, bones) ? Float32Array.from(bones) : null;

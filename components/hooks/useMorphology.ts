@@ -27,14 +27,17 @@ export function useMorphology(viewerRef: RefObject<GarmentViewer | null>, ready:
   // Body: one recompute per frame, measurements once the user pauses.
   useEffect(() => {
     if (!ready) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const frame = requestAnimationFrame(() => {
       const viewer = viewerRef.current;
       if (!viewer) return;
       const ph = toPhenotype(morph);
       ph.height = viewer.model.solveHeight(ph, morph.local, morph.statureCm / 100);
       viewer.setBody(ph, morph.local);
+      // Counted from here: started with the frame's request, the delay could end before a slow
+      // frame comes, and the previous body be measured — and the garment drafted for it.
+      timer = setTimeout(() => setMeasurements(viewer.measure()), MEASURE_DELAY);
     });
-    const timer = setTimeout(() => setMeasurements(viewerRef.current?.measure() ?? null), MEASURE_DELAY);
     return () => {
       cancelAnimationFrame(frame);
       clearTimeout(timer);

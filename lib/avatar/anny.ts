@@ -82,6 +82,7 @@ export class AnnyModel {
   private readonly lcBones = new Map<string, { plus: number[]; minus: number[] }>();
   /** Scratch buffer for the stature probes. */
   private probe: Float32Array | null = null;
+  private readonly peaks = new Map<string, [number, number]>();
 
   constructor(
     readonly meta: AnnyMeta,
@@ -170,6 +171,29 @@ export class AnnyModel {
     const joints: BodyShape["joints"] = {};
     bones.labels.forEach((l, i) => (joints[l] = [j[3 * i], j[3 * i + 1], j[3 * i + 2]]));
     return { positions: pos, joints };
+  }
+
+  /**
+   * The vertex a local change moves the most (its "+" side) and its mirror image across the
+   * mid-plane of the body: for a change named after a width, the two points the tape is held on.
+   */
+  localChangePeak(label: string): [number, number] {
+    let peak = this.peaks.get(label);
+    if (!peak) {
+      const d = this.lcPlus.get(label)!, b = this.base;
+      let at = 0, most = 0;
+      for (let i = 0; i < d.length; i += 3) {
+        const m = d[i] * d[i] + d[i + 1] * d[i + 1] + d[i + 2] * d[i + 2];
+        if (m > most) [most, at] = [m, i];
+      }
+      let mirror = at, nearest = Infinity;
+      for (let i = 0; i < b.length; i += 3) {
+        const m = (b[i] + b[at]) ** 2 + (b[i + 1] - b[at + 1]) ** 2 + (b[i + 2] - b[at + 2]) ** 2;
+        if (m < nearest) [nearest, mirror] = [m, i];
+      }
+      this.peaks.set(label, (peak = [at / 3, mirror / 3]));
+    }
+    return peak;
   }
 
   /** Stature (m) of a computed shape. */

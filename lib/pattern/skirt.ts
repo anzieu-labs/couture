@@ -1,5 +1,5 @@
 import { cubic, polylineLength, type P2 } from "./curves";
-import { mirror, NO_EDITS, PointSet, type BodyMeasures, type Edge, type Pattern, type PatternEdits, type Piece, type Seam } from "./types";
+import { mirror, NO_EDITS, PointSet, type Belt, type BodyMeasures, type Edge, type Pattern, type PatternEdits, type Piece, type Seam } from "./types";
 
 /**
  * A-line skirt: a front and a back, each symmetric (can be cut on the fold),
@@ -20,20 +20,33 @@ export interface SkirtParams {
   hipEase: number;
   /** Extra width at the hem, each side of each panel (cm). */
   flare: number;
-  /**
-   * Elasticity of the waistband: how far it may stretch (%). 0: a rigid waistband, the skirt
-   * stays at the waist; the more elastic, the lower it sits on the hips. NO_WAISTBAND: a raw
-   * waist edge — only the stretch of the fabric holds the skirt, which slides off.
-   */
-  waistband: number;
 }
 
-/** Top of the waistband elasticity setting (%): no waistband at all. */
-export const NO_WAISTBAND = 40;
+/**
+ * The belt a skirt comes with (types.ts Belt): a rigid waistband along its waist. Without it
+ * nothing but the stretch of the fabric keeps the waist from opening, and the skirt slides
+ * over the hips; the more elastic, the lower it sits. Like any belt, it is changed or taken
+ * off in the 2D editor.
+ */
+export const SKIRT_BELTS: readonly Belt[] = [{ piece: "front", edge: "waist+", stretch: 0 }];
 
-export const DEFAULT_SKIRT: SkirtParams = { length: 0, waistEase: 2, hipEase: 4, flare: 9, waistband: 0 };
+export const DEFAULT_SKIRT: SkirtParams = { length: 0, waistEase: 2, hipEase: 4, flare: 9 };
 
 export const skirtAutoLength = (m: BodyMeasures) => Math.round(m.waistToKnee + 4);
+/**
+ * A long skirt's automatic length: above the ankle. Not lower: the skirt sits some 6 cm under
+ * the natural waist once worn, and a hem that reaches the floor is trodden on at the first
+ * step (10 cm above the floor as drafted: 875 crossings and the cloth stretched by 60 to 95 %).
+ */
+export const longSkirtAutoLength = (m: BodyMeasures) => Math.round(m.waistToFloor - 26);
+
+/** What makes a garment of this block: its name and its length when left automatic. */
+export interface SkirtStyle {
+  name: string;
+  autoLength: (m: BodyMeasures) => number;
+}
+
+export const SKIRT: SkirtStyle = { name: "Jupe trapèze", autoLength: skirtAutoLength };
 
 function panel(kind: "front" | "back", m: { W: number; Hh: number; hd: number; L: number; flare: number; cw: number }, edits: PatternEdits) {
   const { W, Hh, hd, L, flare, cw } = m;
@@ -76,8 +89,8 @@ function panel(kind: "front" | "back", m: { W: number; Hh: number; hd: number; L
   return { edges: [...plus, ...minus], handles: P.handles, WS, HS, HE, CH, CW, side, hipT, waist };
 }
 
-export function draftSkirt(b: BodyMeasures, p: SkirtParams = DEFAULT_SKIRT, edits: PatternEdits = NO_EDITS): Pattern {
-  const L = p.length > 0 ? p.length : skirtAutoLength(b);
+export function draftSkirt(b: BodyMeasures, p: SkirtParams = DEFAULT_SKIRT, edits: PatternEdits = NO_EDITS, style: SkirtStyle = SKIRT): Pattern {
+  const L = p.length > 0 ? p.length : style.autoLength(b);
   const W = (b.waist + p.waistEase) / 4;
   const Hh = Math.max(W, (b.hips + p.hipEase) / 4);
   const hd = Math.min(b.waistToHip, L - 5);
@@ -112,15 +125,9 @@ export function draftSkirt(b: BodyMeasures, p: SkirtParams = DEFAULT_SKIRT, edit
   const length = -front.CH[1] + front.CW[1];
   return {
     kind: "skirt",
-    name: "Jupe trapèze",
+    name: style.name,
     pieces,
     seams,
-    // Waistband: without it nothing but the stretch of the fabric keeps the waist from opening,
-    // and the skirt slides over the hips.
-    bands:
-      (p.waistband ?? 0) < NO_WAISTBAND
-        ? [{ edges: (["front", "back"] as const).flatMap((piece) => ["waist+", "waist-"].map((edge) => ({ piece, edge }))), stretch: (p.waistband ?? 0) / 100 }]
-        : [],
     handles: [...front.handles, ...back.handles],
     dims: [
       { label: "Tour de taille", value: waist },

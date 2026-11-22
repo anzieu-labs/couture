@@ -4,6 +4,14 @@ import type { BodySdf } from "./bodySdf";
 /**
  * Collisions with the animated (skinned) mannequin, in rest space.
  *
+ * "Rest" here is the pose the collision field was built in, and the bone transforms are
+ * counted from: the body as it stands (avatar/motion.ts standingBody), not the morphology's own
+ * A-pose. Standing still, the transforms are the identity and none of what follows runs: the
+ * cloth collides with the very body that is shown. What follows is an approximation whose
+ * error grows with how far the bones have moved from the reference pose (the skin weights
+ * are those of the closest body vertex, interpolated on the grid: a little off for a point
+ * above the skin) — which is why the reference is the pose the mannequin spends its time in.
+ *
  * The body is posed by linear blend skinning: x ↦ M(x)·x with M(x) = Σ wₖ(x) Bₖ.
  * Rebuilding the distance field every frame would be costly; instead each cloth
  * vertex p is brought back to the rest pose, q = M⁻¹·p, tested against the
@@ -29,11 +37,12 @@ import type { BodySdf } from "./bodySdf";
  * nothing — even while a forearm, raised and swung by a run, goes right through it. A vertex
  * with no contact is therefore also brought back by the rigid transform of each far-swinging
  * limb (SdfGrid.limbs: forearms, hands, lower legs, feet): q = Bₖ⁻¹·p, kept if it falls in
- * the limb's bounding sphere, under the skin offset, and in skin that the limb's bone does
+ * the limb's bounding capsule, under the skin offset, and in skin that the limb's bone does
  * drive (blend at q ≈ Bₖ, same tolerance). The deepest such contact pushes the vertex out;
  * no friction there (the reference position belongs to the other preimage).
  *
- * Impacts (on the limbs above only, where the cloth meets fast-moving skin): contacts are
+ * Impacts (on the limbs above only — rest-space points inside a limb's capsule —, where the
+ * cloth meets fast-moving skin): contacts are
  * tested at the vertices only, and a vertex is pushed out along the
  * field's gradient — away from the limb's axis. A forearm arriving fast thus pushes the
  * vertices on either side of it apart, like a wedge, faster than the stretch constraints
@@ -62,7 +71,14 @@ export const POSE_TOLERANCE = 0.005;
 export const IMPACT_SPEED = { from: 1.5, to: 3 };
 /**
  * Contact margin added to the skin offset for cloth moving relative to the skin: the distance
- * covered in `time` seconds (whatever the substep), up to `max` (m).
+ * covered in `time` seconds (whatever the substep), up to `max` (m). It stops the cloth that
+ * comes in from outside it. Cloth already inside it is pushed back out to it by skin that
+ * itself moves fast (IMPACT_SPEED: a runner's forearm, which the cloth must be kept ahead of),
+ * and only kept from coming nearer by slow skin: pushed out whatever the skin's speed, a sleeve
+ * falling back on a walker's arm was thrown 1 to 2.5 cm off it in one substep, fell back faster
+ * still, and so on — on the GPU the hem of a t-shirt's sleeve jumped 1 to 3 cm from one frame
+ * to the next, as in a gale (4 mm per frame² rms; 0.9 now, the rest of the t-shirt's). Never
+ * pushed out, a runner's forearms were through a cape half of the time.
  */
 export const IMPACT_MARGIN = { time: 0.005, max: 0.025 };
 

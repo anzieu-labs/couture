@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
 import { GIRTH_LOCAL_CHANGE, type Girth, type GirthTargets } from "@/lib/avatar/fit";
+import { LOCAL_TAPES, localChangeCm, type LocalSpan } from "@/lib/avatar/localMeasures";
 import type { Measurements } from "@/lib/avatar/measure";
 import { LOCAL_CHANGE_LABELS, MORPHOLOGY_SLIDERS, type Morphology, type SliderDef } from "@/lib/avatar/morphology";
+import type { LocalTape } from "./hooks/useLocalSpans";
 import { MeasurementsCard } from "./MeasurementsCard";
 import { RangeField } from "./RangeField";
 import { Section } from "./Section";
@@ -18,6 +19,12 @@ interface Props {
   onTargets: (t: GirthTargets) => void;
   saturated: Girth[];
   fitting: boolean;
+  /** The local changes ("ajustements de couture") are shown. */
+  showLocal: boolean;
+  onShowLocal: (show: boolean) => void;
+  /** The tape measure of each local change on the body, and what the change adds to it (useLocalSpans); missing while being measured. */
+  localTapes: Record<string, LocalTape>;
+  localSpans: Record<string, LocalSpan>;
 }
 
 /** Sliders shown for a woman only. */
@@ -29,9 +36,19 @@ function sliderDisplay(s: SliderDef, v: number): string {
   return String(v);
 }
 
+/**
+ * The measure a local change is named after, with the change at `v` (cm): as taken on the
+ * body, moved by what the change has added since — the body is measured again once the
+ * sliders rest.
+ */
+function tapeCm(tape: LocalTape | undefined, span: LocalSpan | undefined, v: number): string {
+  if (!tape) return "…";
+  const cm = tape.cm + (span ? localChangeCm(span, v) - localChangeCm(span, tape.at) : 0);
+  return `${cm.toLocaleString("fr-FR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} cm`;
+}
+
 export function MorphologyPanel(props: Props) {
-  const { value, onChange, measurements, presets, onPreset, targets, onTargets, saturated, fitting } = props;
-  const [showLocal, setShowLocal] = useState(false);
+  const { value, onChange, measurements, presets, onPreset, targets, onTargets, saturated, fitting, showLocal, onShowLocal, localTapes, localSpans } = props;
   const driven = new Set(
     (Object.keys(targets) as Girth[]).filter((k) => targets[k] !== undefined).map((k) => GIRTH_LOCAL_CHANGE[k]),
   );
@@ -86,7 +103,7 @@ export function MorphologyPanel(props: Props) {
       <section>
         <button
           type="button"
-          onClick={() => setShowLocal((s) => !s)}
+          onClick={() => onShowLocal(!showLocal)}
           aria-expanded={showLocal}
           className="flex w-full items-baseline justify-between text-left"
         >
@@ -97,6 +114,9 @@ export function MorphologyPanel(props: Props) {
         </button>
         {showLocal && (
           <div className="mt-3 space-y-3.5">
+            <p className="text-[11px] leading-relaxed text-muted">
+Mesures du corps en cm (survolez une valeur pour savoir où elle est prise). La stature reste la même : allonger une partie du corps raccourcit un peu les autres.
+            </p>
             {Object.entries(LOCAL_CHANGE_LABELS).map(([key, label]) => {
               const v = value.local[key] ?? 0;
               const isDriven = driven.has(key);
@@ -113,7 +133,7 @@ export function MorphologyPanel(props: Props) {
                   max={1}
                   step={0.02}
                   value={v}
-                  display={`${v > 0 ? "+" : ""}${Math.round(v * 100)} %`}
+                  display={<span title={LOCAL_TAPES[key]?.what}>{tapeCm(localTapes[key], localSpans[key], v)}</span>}
                   disabled={isDriven}
                   onChange={(x) => setLocal(key, x)}
                   onDoubleClick={() => setLocal(key, 0)}

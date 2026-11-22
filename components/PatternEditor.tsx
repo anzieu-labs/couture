@@ -1,11 +1,13 @@
 "use client";
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BELT_STRETCH, ringLength, validBelts } from "@/lib/pattern/belt";
+import { distanceToPiece, piecePointAt, piecePointPosition, twinPoint, validClasps } from "@/lib/pattern/clasp";
 import type { P2 } from "@/lib/pattern/curves";
 import { constrain, SNAP, withDelta } from "@/lib/pattern/edit";
 import { cutPieces, type Allowances } from "@/lib/pattern/markings";
 import type { GarmentDef, GarmentParams } from "@/lib/pattern/garments";
-import { NO_EDITS, seamSideLength, type BodyMeasures, type Handle, type Pattern, type PatternEdits } from "@/lib/pattern/types";
+import { NO_EDITS, seamSideLength, type Belt, type BodyMeasures, type Clasp, type Handle, type Pattern, type PatternEdits, type Piece, type PiecePoint } from "@/lib/pattern/types";
 import { outline, patternIssues } from "@/lib/pattern/validate";
 import { edgeColorer } from "./seamColors";
 
@@ -22,6 +24,12 @@ interface Props {
   /** The point hovered, dragged or selected here changed: highlighted on the garment. */
   onFocus: (key: string | null) => void;
   onCommit: (edits: PatternEdits) => void;
+  /** Clasps added on the pattern, and how this editor changes them (the "Fermoir" tool). */
+  clasps: readonly Clasp[];
+  onClasps: (clasps: readonly Clasp[]) => void;
+  /** Belts, likewise (the "Ceinture" tool). */
+  belts: readonly Belt[];
+  onBelts: (belts: readonly Belt[]) => void;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -31,7 +39,50 @@ interface Props {
 }
 
 const GAP = 8; // cm between pieces
-const ZOOM = { min: 2, max: 80 }; // px per cm
+const ZOOM = { min: 0.6, max: 80 }; // px per cm
+/** Clasps: their colour, and (screen px) how close to a piece a click counts and to its outline it snaps. */
+const CLASP = { color: "#b83280", reach: 12, snap: 8 };
+/** Belts: their colour, how close to an edge a click takes it (screen px), and what their edges are called. */
+const BELT = { color: "#8a5a2b", reach: 12 };
+const EDGE_NAMES: Record<string, string> = { waist: "taille", hem: "bas", neck: "encolure", arm: "emmanchure", cf: "bord devant", face: "bord de capuche" };
+/** A belt's elasticity in words: "rigide", "élastique +10 %", "fronce −15 %". */
+const stretchLabel = (stretch: number) => {
+  const pct = Math.round(stretch * 100);
+  return pct === 0 ? "rigide" : pct > 0 ? `élastique +${pct} %` : `fronce −${-pct} %`;
+};
+
+/**
+ * The accessories that can be put on a pattern, as the palette shows them: each is a tool —
+ * choose it, then click on the pieces. To add one: an entry here, its tool below, and what
+ * the simulation makes of it (lib/pattern/mesh.ts).
+ */
+type Accessory = "clasp" | "belt";
+const ACCESSORIES: { id: Accessory; name: string; what: string; icon: React.ReactNode }[] = [
+  {
+    id: "clasp",
+    name: "Fermoir",
+    what: "Deux points tenus ensemble : une cape fermée au cou.",
+    icon: (
+      <>
+        <circle cx="7" cy="12" r="3.2" />
+        <circle cx="17" cy="12" r="3.2" />
+        <path d="M10.2 12h3.6" />
+      </>
+    ),
+  },
+  {
+    id: "belt",
+    name: "Ceinture",
+    what: "Un élastique le long d'un bord (taille, bas, encolure), sur tout son tour.",
+    icon: (
+      <>
+        <path d="M2.5 9.5h19v5h-19z" />
+        <rect x="9.5" y="8" width="5" height="8" rx="1" />
+        <path d="M12 12h3" />
+      </>
+    ),
+  },
+];
 
 
 interface View {
@@ -43,7 +94,7 @@ interface View {
 
 type Drag =
   | { kind: "handle"; key: string; axis: Handle["axis"]; ox: number; oy: number; start: P2; startDelta: P2; moved: boolean }
-  | { kind: "pan"; startClient: P2; startView: View };
+  | { kind: "pan"; startClient: P2; startView: View; moved: boolean };
 
 const fmt = (v: number, digits = 1) => v.toLocaleString("fr-FR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const signed = (v: number) => `${v > 0.04 ? "+" : v < -0.04 ? "−" : "±"}${fmt(Math.abs(v))}`;
@@ -80,7 +131,7 @@ function shownPieces(pattern: Pattern) {
  * of a drag under way are shared (`live`), whichever side it happens on.
  * Memoised: the studio re-renders with the simulation progress, the editor need not.
  */
-export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onCommit, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
+export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onCommit, clasps, onClasps, belts, onBelts, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
   const liveRef = useRef<PatternEdits | null>(null);
   const shown = live ?? edits;
   const pattern = useMemo(() => garment.draft(measures, params, shown), [garment, measures, params, shown]);
@@ -164,6 +215,21 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   const [hoverSeam, setHoverSeam] = useState<string | null>(null);
   const drag = useRef<Drag | null>(null);
   const [dragging, setDragging] = useState<string | "pan" | null>(null);
+  // The "Fermoir" tool: null when off; `a`: its first end, once clicked.
+  const [placing, setPlacing] = useState<{ a: PiecePoint | null } | null>(null);
+  const [hotClasp, setHotClasp] = useState<number | null>(null);
+  const [selectedClasp, setSelectedClasp] = useState<number | null>(null);
+  // The "Ceinture" tool, the belt pointed at or selected, and the palette of accessories.
+  const [belting, setBelting] = useState(false);
+  const [hotBelt, setHotBelt] = useState<number | null>(null);
+  const [selectedBelt, setSelectedBelt] = useState<number | null>(null);
+  const [palette, setPalette] = useState(false);
+  const tool: Accessory | null = placing ? "clasp" : belting ? "belt" : null;
+  const chooseTool = (next: Accessory | null) => {
+    setPlacing(next === "clasp" ? { a: null } : null);
+    setBelting(next === "belt");
+    setPalette(false);
+  };
 
   const setLiveEdits = (e: PatternEdits | null) => {
     liveRef.current = e;
@@ -171,6 +237,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   };
 
   const startHandleDrag = (e: React.PointerEvent, h: Handle, ox: number, oy: number) => {
+    if (tool) return; // an accessory tool takes the click, even on a point of the draft
     e.stopPropagation();
     (e.target as Element).setPointerCapture(e.pointerId);
     const [sx, sy] = toSheet(e.clientX, e.clientY);
@@ -182,9 +249,73 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   const onPointerDown = (e: React.PointerEvent) => {
     if (!view) return;
     (e.target as Element).setPointerCapture(e.pointerId);
-    drag.current = { kind: "pan", startClient: [e.clientX, e.clientY], startView: view };
+    drag.current = { kind: "pan", startClient: [e.clientX, e.clientY], startView: view, moved: false };
     setDragging("pan");
     setSelected(null);
+    setSelectedClasp(null);
+    setSelectedBelt(null);
+  };
+
+  /**
+   * A click of the "Fermoir" tool: the first one sets where the clasp starts, the second one
+   * where it fastens. On a piece cut twice, of which one is drawn, a second click on the piece
+   * of the first means its twin — the other front of a cape — unless `sameCopy`.
+   */
+  const placeClasp = (clientX: number, clientY: number, sameCopy: boolean) => {
+    if (!placing || !view) return;
+    const [sx, sy] = toSheet(clientX, clientY);
+    let hit: { piece: Piece; pos: P2; d: number } | null = null;
+    for (const slot of layout.slots) {
+      const piece = pattern.pieces.find((p) => p.id === slot.id);
+      if (!piece) continue;
+      const pos: P2 = [sx - slot.ox, slot.oy - sy];
+      const d = distanceToPiece(piece, pos);
+      if (d <= CLASP.reach / view.s && (!hit || d < hit.d)) hit = { piece, pos, d };
+    }
+    if (!hit) return;
+    const point = piecePointAt(hit.piece, hit.pos, CLASP.snap / view.s);
+    if (!placing.a) return setPlacing({ a: point });
+    const b = placing.a.piece === point.piece && !sameCopy ? (twinPoint(pattern, point) ?? point) : point;
+    const [clasp] = validClasps(pattern, [{ a: placing.a, b }]);
+    if (!clasp) return; // both ends on the same spot: wait for another click
+    onClasps([...clasps, clasp]);
+    setPlacing(null);
+  };
+  /**
+   * A click of the "Ceinture" tool: on a free edge of a piece — not a seam — which becomes a
+   * belt, all the way round the garment (lib/pattern/belt.ts). One per tour: a second one
+   * replaces the first.
+   */
+  const placeBelt = (clientX: number, clientY: number) => {
+    if (!view) return;
+    const [sx, sy] = toSheet(clientX, clientY);
+    let hit: { piece: Piece; pos: P2; d: number } | null = null;
+    for (const slot of layout.slots) {
+      const piece = pattern.pieces.find((p) => p.id === slot.id);
+      if (!piece) continue;
+      const pos: P2 = [sx - slot.ox, slot.oy - sy];
+      const d = distanceToPiece(piece, pos);
+      if (d <= BELT.reach / view.s && (!hit || d < hit.d)) hit = { piece, pos, d };
+    }
+    if (!hit) return;
+    const point = piecePointAt(hit.piece, hit.pos, BELT.reach / view.s);
+    if (point.offset[0] !== 0 || point.offset[1] !== 0) return; // inside the piece, away from its edges
+    const belt: Belt = { piece: point.piece, edge: point.edge, stretch: BELT_STRETCH.initial };
+    const [added] = validBelts(pattern, [belt]);
+    if (!added) return; // a seam: wait for a click on a free edge
+    const on = (b: Belt) => added.ring.some((r) => r.piece === b.piece && r.edge === b.edge);
+    onBelts([...belts.filter((b) => !on(b)), belt]);
+    setBelting(false);
+  };
+  const removeBelt = (index: number) => {
+    onBelts(belts.filter((_, i) => i !== index));
+    setSelectedBelt(null);
+    setHotBelt(null);
+  };
+  const removeClasp = (index: number) => {
+    onClasps(clasps.filter((_, i) => i !== index));
+    setSelectedClasp(null);
+    setHotClasp(null);
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -192,6 +323,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
     if (!d) return;
     if (d.kind === "pan") {
       const v = d.startView;
+      if (Math.hypot(e.clientX - d.startClient[0], e.clientY - d.startClient[1]) > 4) d.moved = true;
       setView({ ...v, x: v.x - (e.clientX - d.startClient[0]) / v.s, y: v.y - (e.clientY - d.startClient[1]) / v.s });
       return;
     }
@@ -206,12 +338,16 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
     setLiveEdits(withDelta(edits, d.key, next));
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (e: React.PointerEvent) => {
     const d = drag.current;
     drag.current = null;
     setDragging(null);
     if (d?.kind === "handle" && d.moved && liveRef.current) onCommit(liveRef.current);
     setLiveEdits(null);
+    // A click (not a pan) with the clasp tool on.
+    if (d?.kind !== "pan" || d.moved || e.type !== "pointerup") return;
+    if (placing) placeClasp(e.clientX, e.clientY, e.altKey);
+    else if (belting) placeBelt(e.clientX, e.clientY);
   };
 
   const resetHandle = useCallback((key: string) => onCommit(withDelta(edits, key, [0, 0])), [edits, onCommit]);
@@ -233,6 +369,21 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
         onRedo();
         return;
       }
+      if ((placing || belting || palette) && e.key === "Escape") return chooseTool(null);
+      if (selectedBelt !== null && (e.key === "Delete" || e.key === "Backspace")) {
+        e.preventDefault();
+        onBelts(belts.filter((_, i) => i !== selectedBelt));
+        setSelectedBelt(null);
+        return;
+      }
+      if (selectedBelt !== null && e.key === "Escape") return setSelectedBelt(null);
+      if (selectedClasp !== null && (e.key === "Delete" || e.key === "Backspace")) {
+        e.preventDefault();
+        onClasps(clasps.filter((_, i) => i !== selectedClasp));
+        setSelectedClasp(null);
+        return;
+      }
+      if (selectedClasp !== null && e.key === "Escape") return setSelectedClasp(null);
       if (!selected) return;
       const h = pattern.handles.find((x) => x.key === selected);
       if (!h) return;
@@ -251,7 +402,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, pattern, edits, onCommit, onUndo, onRedo, resetHandle]);
+  }, [selected, pattern, edits, onCommit, onUndo, onRedo, resetHandle, placing, belting, palette, selectedClasp, clasps, onClasps, selectedBelt, belts, onBelts]);
 
   // ---- Drawing.
   const s = view?.s ?? 1;
@@ -272,6 +423,29 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   const focusDelta = focus ? (shown[focus.key] ?? [0, 0]) : null;
   const pieceName = (h: Handle) => pattern.pieces.find((p) => p.id === h.piece)?.name ?? "";
 
+  // ---- Clasps: where their ends are drawn. An end on the twin of a drawn piece (the other
+  // front of a cape) is shown at the same place of the drawn one, as a ring.
+  const claspMark = (end: PiecePoint) => {
+    let point: PiecePoint | null = end, slot = layout.slots.find((sl) => sl.id === end.piece);
+    const twin = !slot;
+    if (!slot) {
+      point = twinPoint(pattern, end);
+      slot = point ? layout.slots.find((sl) => sl.id === point!.piece) : undefined;
+    }
+    const pos = point && slot ? piecePointPosition(pattern, point) : null;
+    return pos && slot ? { x: pos[0] + slot.ox, y: slot.oy - pos[1], twin } : null;
+  };
+  const claspName = (c: Clasp) => {
+    const name = (id: string) => pattern.pieces.find((p) => p.id === id)?.name ?? "?";
+    const a = name(c.a.piece), b = name(c.b.piece);
+    return a === b && c.a.piece !== c.b.piece ? `${a} ↔ l'autre ${b.toLowerCase()}` : `${a} ↔ ${b}`;
+  };
+  const pending = placing?.a ? claspMark(placing.a) : null;
+  // ---- Belts: the edges each runs along, and the one it was put on.
+  const worn = validBelts(pattern, belts);
+  const beltIndex = (b: Belt) => belts.indexOf(b);
+  const beltName = (b: Belt) => EDGE_NAMES[b.edge.replace(/[+-]$/, "")] ?? b.edge;
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-4 py-2.5">
@@ -281,6 +455,36 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
         <ToolButton onClick={() => onCommit(NO_EDITS)} disabled={editCount === 0} title="Revenir au tracé d'origine (morphologie et coupe conservées)">
           Réinitialiser{editCount ? ` (${editCount})` : ""}
         </ToolButton>
+        <div className="relative">
+          <ToolButton onClick={() => (tool ? chooseTool(null) : setPalette((p) => !p))} active={!!tool || palette} title="Ajouter un accessoire sur le patron" aria-expanded={palette}>
+            {tool ? `${ACCESSORIES.find((a) => a.id === tool)!.name} · annuler` : "Accessoires +"}
+          </ToolButton>
+          {palette && (
+            <div className="absolute right-0 top-full z-20 mt-2 w-72 rounded-xl border border-line bg-panel p-2 shadow-lg" role="menu" aria-label="Accessoires">
+              <div className="grid grid-cols-2 gap-2">
+                {ACCESSORIES.map((a) => {
+                  return (
+                    <button
+                      key={a.id}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => chooseTool(a.id)}
+                      title={a.what}
+                      className="flex flex-col items-start gap-1 rounded-lg border border-line bg-white/70 p-2.5 text-left transition-colors hover:border-ink"
+                    >
+                      <svg viewBox="0 0 24 24" className="size-7" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" aria-hidden>
+                        {a.icon}
+                      </svg>
+                      <span className="text-xs font-semibold">{a.name}</span>
+                      <span className="text-[10.5px] leading-snug text-muted">{a.what}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-2 px-0.5 text-[10.5px] leading-snug text-muted">Choisir un accessoire, puis cliquer sur le patron pour le poser. Il apparaît dans la liste, d&apos;où on le retire.</p>
+            </div>
+          )}
+        </div>
         <ToolButton onClick={() => setView(fit())} title="Afficher toutes les pièces">Recadrer</ToolButton>
         <button
           type="button"
@@ -303,7 +507,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
             height={size.h}
             viewBox={`${view.x} ${view.y} ${size.w / s} ${size.h / s}`}
             className="absolute inset-0 touch-none select-none"
-            style={{ cursor: dragging === "pan" ? "grabbing" : "grab" }}
+            style={{ cursor: tool ? "crosshair" : dragging === "pan" ? "grabbing" : "grab" }}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
@@ -373,7 +577,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
                       onPointerDown: (e: React.PointerEvent) => startHandleDrag(e, h, slot.ox, slot.oy),
                       onPointerEnter: () => setHovered(h.key),
                       onPointerLeave: () => setHovered((k) => (k === h.key ? null : k)),
-                      onDoubleClick: () => resetHandle(h.key),
+                      onDoubleClick: () => !tool && resetHandle(h.key),
                     };
                     const r = px(h.anchor ? 4.5 : 5.5);
                     return (
@@ -387,6 +591,81 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
                 </g>
               );
             })}
+
+            {/* Belts: their edges drawn over, and their elasticity written by the edge they were put on. */}
+            {worn.map(({ belt, ring }) => {
+              const i = beltIndex(belt), hot = hotBelt === i || selectedBelt === i;
+              return (
+                <g
+                  key={`belt${i}`}
+                  style={{ cursor: "pointer" }}
+                  onPointerDown={(e) => {
+                    if (tool) return;
+                    e.stopPropagation();
+                    setSelected(null);
+                    setSelectedClasp(null);
+                    setSelectedBelt(i);
+                  }}
+                  onPointerEnter={() => setHotBelt(i)}
+                  onPointerLeave={() => setHotBelt((k) => (k === i ? null : k))}
+                >
+                  {ring.map(({ piece, edge }) => {
+                    const slot = layout.slots.find((sl) => sl.id === piece);
+                    const pts = slot && pattern.pieces.find((q) => q.id === piece)?.edges.find((q) => q.id === edge)?.pts;
+                    if (!slot || !pts) return null;
+                    const d = pts.map(([x, y]) => `${x + slot.ox},${slot.oy - y}`).join(" ");
+                    const mid = pts[Math.floor(pts.length / 2)];
+                    return (
+                      <g key={`${piece}/${edge}`}>
+                        <polyline points={d} fill="none" stroke="transparent" strokeWidth={px(14)} />
+                        <polyline points={d} fill="none" stroke={BELT.color} strokeWidth={px(hot ? 5.5 : 4)} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+                        <polyline points={d} fill="none" stroke="white" strokeWidth={px(1)} strokeDasharray={`${px(4)} ${px(4)}`} pointerEvents="none" />
+                        {piece === belt.piece && edge === belt.edge && (
+                          <text x={mid[0] + slot.ox} y={slot.oy - mid[1] + px(18)} fontSize={px(11)} textAnchor="middle" fill={BELT.color} stroke="white" strokeWidth={px(3)} paintOrder="stroke" pointerEvents="none" fontWeight={600}>
+                            ceinture · {stretchLabel(belt.stretch)}
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
+                </g>
+              );
+            })}
+
+            {/* Clasps: a dot where each starts, a ring where it fastens on the piece's twin, a dashed line between the two. */}
+            {clasps.map((c, i) => {
+              const a = claspMark(c.a), b = claspMark(c.b);
+              if (!a || !b) return null;
+              const hot = hotClasp === i || selectedClasp === i;
+              const events = {
+                style: { cursor: "pointer" },
+                onPointerDown: (e: React.PointerEvent) => {
+                  if (tool) return;
+                  e.stopPropagation();
+                  setSelected(null);
+                  setSelectedBelt(null);
+                  setSelectedClasp(i);
+                },
+                onPointerEnter: () => setHotClasp(i),
+                onPointerLeave: () => setHotClasp((k) => (k === i ? null : k)),
+              };
+              return (
+                <g key={i}>
+                  <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={CLASP.color} strokeWidth={px(hot ? 2.5 : 1.5)} strokeDasharray={`${px(5)} ${px(3)}`} pointerEvents="none" />
+                  {[a, b].map((m, k) => (
+                    <g key={k} {...events}>
+                      <circle cx={m.x} cy={m.y} r={px(12)} fill="transparent" />
+                      {m.twin ? (
+                        <circle cx={m.x} cy={m.y} r={px(hot ? 9.5 : 8.5)} fill="none" stroke={CLASP.color} strokeWidth={px(2)} />
+                      ) : (
+                        <circle cx={m.x} cy={m.y} r={px(hot ? 6 : 5)} fill={CLASP.color} stroke="white" strokeWidth={px(1.5)} />
+                      )}
+                    </g>
+                  ))}
+                </g>
+              );
+            })}
+            {pending && <circle cx={pending.x} cy={pending.y} r={px(5)} fill={CLASP.color} stroke="white" strokeWidth={px(1.5)} pointerEvents="none" />}
           </svg>
         )}
 
@@ -417,10 +696,87 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
             ))}
           </ul>
           <p className="mt-1.5 text-[10px] leading-snug text-muted">Devant / dos (cm). Embu : tête de manche − emmanchure.</p>
+          {clasps.length + belts.length > 0 && (
+            <>
+              <p className="mb-1.5 mt-2.5 font-semibold uppercase tracking-[0.14em] text-muted">Accessoires</p>
+              <ul className="space-y-1">
+                {worn.map(({ belt: b, ring }) => {
+                  const i = beltIndex(b);
+                  const length = ringLength(pattern, ring) * (1 + Math.min(0, b.stretch));
+                  const stretch = (by: number) =>
+                    onBelts(belts.map((x) => (x === b ? { ...x, stretch: Math.round(Math.max(BELT_STRETCH.min, Math.min(BELT_STRETCH.max, x.stretch + by)) * 100) / 100 } : x)));
+                  const button = "grid size-5 place-items-center rounded-full text-muted transition-colors hover:bg-white hover:text-ink";
+                  return (
+                    <li
+                      key={`belt${i}`}
+                      className={`flex items-center justify-between gap-2 rounded px-1 ${hotBelt === i || selectedBelt === i ? "bg-canvas" : ""}`}
+                      onPointerEnter={() => setHotBelt(i)}
+                      onPointerLeave={() => setHotBelt(null)}
+                    >
+                      <span className="flex items-start gap-1.5">
+                        <span className="mt-1.5 inline-block h-1 w-3 shrink-0 rounded-full" style={{ background: BELT.color }} aria-hidden />
+                        <span>
+                          Ceinture · {beltName(b)}
+                          <span className="block text-[10px] text-muted">
+                            {fmt(length)} cm · {stretchLabel(b.stretch)}
+                          </span>
+                        </span>
+                      </span>
+                      <span className="flex items-center gap-0.5">
+                        <button type="button" onClick={() => stretch(-BELT_STRETCH.step)} title="Plus serrée (moins élastique, puis froncée)" aria-label="Serrer la ceinture" className={button}>
+                          −
+                        </button>
+                        <button type="button" onClick={() => stretch(BELT_STRETCH.step)} title="Plus élastique" aria-label="Rendre la ceinture plus élastique" className={button}>
+                          +
+                        </button>
+                        <button type="button" onClick={() => removeBelt(i)} title="Supprimer la ceinture" aria-label="Supprimer la ceinture" className={button}>
+                          ×
+                        </button>
+                      </span>
+                    </li>
+                  );
+                })}
+                {clasps.map((c, i) => (
+                  <li
+                    key={i}
+                    className={`flex items-center justify-between gap-2 rounded px-1 ${hotClasp === i || selectedClasp === i ? "bg-canvas" : ""}`}
+                    onPointerEnter={() => setHotClasp(i)}
+                    onPointerLeave={() => setHotClasp(null)}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="inline-block size-2 rounded-full" style={{ background: CLASP.color }} aria-hidden />
+                      {claspName(c)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeClasp(i)}
+                      aria-label={`Supprimer le fermoir ${claspName(c)}`}
+                      title="Supprimer le fermoir"
+                      className="grid size-5 place-items-center rounded-full text-muted transition-colors hover:bg-white hover:text-ink"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </div>
 
         <div className="pointer-events-none absolute bottom-3 right-3 max-w-[60%] text-right text-[11px] text-muted">
-          {focus && focusDelta ? (
+          {belting ? (
+            <p className="rounded-md bg-white/90 px-2 py-1 text-ink shadow-sm">
+              <span className="font-medium">Ceinture</span> · cliquer un bord libre du patron (taille, bas, encolure… pas une couture) : il devient élastique sur tout son tour · Échap : annuler
+            </p>
+          ) : placing ? (
+            <p className="rounded-md bg-white/90 px-2 py-1 text-ink shadow-sm">
+              <span className="font-medium">Fermoir</span> ·{" "}
+              {placing.a
+                ? "cliquer le point où il se raccroche — sur la même pièce d'une paire (×2), c'est l'autre exemplaire (Alt : le même)"
+                : "cliquer son point de départ sur une pièce"}{" "}
+              · Échap : annuler
+            </p>
+          ) : focus && focusDelta ? (
             <p className="rounded-md bg-white/90 px-2 py-1 text-ink shadow-sm">
               <span className="font-medium">{focus.label}</span> · {pieceName(focus)} · Δ {signed(focusDelta[0])} / {signed(focusDelta[1])} cm
             </p>
@@ -433,12 +789,13 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   );
 });
 
-function ToolButton({ children, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+function ToolButton({ children, active, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean }) {
   return (
     <button
       type="button"
       {...rest}
-      className="rounded-full border border-line bg-white px-3 py-1 text-xs font-medium transition-colors hover:border-ink disabled:opacity-40 disabled:hover:border-line"
+      aria-pressed={active}
+      className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors hover:border-ink disabled:opacity-40 disabled:hover:border-line ${active ? "border-ink bg-ink text-white" : "border-line bg-white"}`}
     >
       {children}
     </button>

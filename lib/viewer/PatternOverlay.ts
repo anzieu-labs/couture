@@ -78,6 +78,9 @@ interface Point {
  * the pattern. The points follow the pattern as it is being edited, from either side.
  *
  * Positions come from the simulation as last seen on this side (`update`).
+ *
+ * Nothing is drawn while a garment is first being sewn and falling into its drape (`hold`):
+ * lines and points flying about with the flat pieces say nothing, and cannot be aimed at.
  */
 export class PatternOverlay {
   readonly group = new THREE.Group();
@@ -91,6 +94,8 @@ export class PatternOverlay {
   private handles: Handle[] = [];
   private positions: Float32Array | null = null;
   private focus: string | null = null;
+  /** The garment is still falling into its first drape: nothing is drawn. */
+  private held = false;
 
   private seams: { mesh: LineSegments2; a: Uint32Array; b: Uint32Array; buffer: Float32Array } | null = null;
   private plain: { mesh: LineSegments2; a: Uint32Array; b: Uint32Array; buffer: Float32Array } | null = null;
@@ -156,12 +161,26 @@ export class PatternOverlay {
   /** Shows the pattern on the garment with these edge colours, or hides it (null). */
   show(colorOf: EdgeColor | null) {
     this.colorOf = colorOf;
-    this.group.visible = !!colorOf;
+    this.group.visible = !!colorOf && !this.held;
     if (!colorOf) {
       this.cancel();
       this.setHover(null);
     }
     this.rebuild();
+  }
+
+  /** Draws nothing while `on` (the garment's first drape), whatever `show` asks; then as asked. */
+  hold(on: boolean) {
+    if (on === this.held) return;
+    this.held = on;
+    this.group.visible = !!this.colorOf && !on;
+    if (on) {
+      this.cancel();
+      this.setHover(null);
+    } else if (this.group.visible) {
+      this.place();
+      this.drawLines();
+    }
   }
 
   /** The pattern's points as currently drawn in the 2D editor (being edited or not). */

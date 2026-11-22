@@ -4,7 +4,7 @@
  * Each constraint kernel solves one colour: no two threads touch the same vertex.
  */
 
-import { PLINTH } from "../model";
+import { BELT, PLINTH } from "../model";
 import { IMPACT_MARGIN, IMPACT_SPEED, POSE_TOLERANCE } from "../posedBody";
 import { NEAR_MARGIN, SELF_CELLS_PER_AXIS, SELF_MAX_CANDIDATES } from "../selfCollision";
 
@@ -13,7 +13,7 @@ export const WORKGROUP = 64;
 const common = /* wgsl */ `
 struct Frame { h: f32, damp: f32, friction: f32, offset: f32, halfThickness: f32, pad0: f32, pad1: f32, pad2: f32 }
 // posed: the body is animated; bones: first vec4 of this substep's bone transforms.
-struct Substep { gravity: f32, sewK: f32, sewing: u32, posed: u32, bones: u32, selfActive: u32, pad1: u32, pad2: u32 }
+struct Substep { gravity: f32, sewK: f32, sewing: u32, posed: u32, bones: u32, selfActive: u32, claspGoal: f32, pad2: u32 }
 struct Range { start: u32, count: u32, pad0: u32, pad1: u32 }
 
 fn getP(i: u32) -> vec3f { return vec3f(pos[3u * i], pos[3u * i + 1u], pos[3u * i + 2u]); }
@@ -163,7 +163,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let w = wa + wb;
   let d = getP(a) - getP(b);
   let len = length(d);
-  let goal = seamStart[s] * substep.sewK;
+  // A clasp (negative start) is fastened once the garment is on: its two points may not be
+  // further apart than claspGoal (model.ts CLASP; huge until then).
+  let start = seamStart[s];
+  let goal = select(start * substep.sewK, substep.claspGoal, start < 0.0);
   if (len <= goal || len < 1e-9 || w == 0.0) { return; }
   let f = (len - goal) / (len * w);
   addP(a, -d * (f * wa));
@@ -188,6 +191,56 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let b = id.x;
   if (b >= arrayLength(&rest)) { return; }
   let band = bands[b];
+  if (band.segments == 0u) {
+    // A belt (model.ts BELT): the way round its vertices, seen from above — the outermost one of
+    // each direction about their centre; longer than the belt, they are drawn level towards it.
+    var c = vec2f(0.0);
+    var m = 0.0;
+    for (var k = 0u; k < band.vertices; k++) {
+      let v = vertices[band.vertex + k];
+      let w = invMass[v];
+      if (w == 0.0) { continue; }
+      c += getP(v).xz / w;
+      m += 1.0 / w;
+    }
+    if (m == 0.0) { return; }
+    c /= m;
+    var far: array<f32, ${BELT.sectors}>;
+    var at: array<u32, ${BELT.sectors}>;
+    for (var s = 0u; s < ${BELT.sectors}u; s++) { far[s] = -1.0; }
+    for (var k = 0u; k < band.vertices; k++) {
+      let v = vertices[band.vertex + k];
+      let d = getP(v).xz - c;
+      let s = min(${BELT.sectors - 1}u, u32((atan2(d.y, d.x) + ${Math.PI}) / ${2 * Math.PI} * ${BELT.sectors}.0));
+      let r = dot(d, d);
+      if (r > far[s]) {
+        far[s] = r;
+        at[s] = v;
+      }
+    }
+    var round = 0.0;
+    var first = vec2f(0.0);
+    var last = vec2f(0.0);
+    var any = false;
+    for (var s = 0u; s < ${BELT.sectors}u; s++) {
+      if (far[s] < 0.0) { continue; }
+      let p = getP(at[s]).xz;
+      if (any) { round += distance(p, last); } else { first = p; }
+      last = p;
+      any = true;
+    }
+    round += distance(first, last);
+    if (!any || round <= rest[b]) { return; }
+    let k = rest[b] / round;
+    for (var i = 0u; i < band.vertices; i++) {
+      let v = vertices[band.vertex + i];
+      if (invMass[v] == 0.0) { continue; }
+      let p = c + (getP(v).xz - c) * k;
+      pos[3u * v] = p.x;
+      pos[3u * v + 2u] = p.y;
+    }
+    return;
+  }
   var total = 0.0;
   for (var k = 0u; k < band.segments; k++) {
     let o = 2u * (band.segment + k);
@@ -309,7 +362,8 @@ export const contactsWGSL = /* wgsl */ `
 @group(0) @binding(4) var<storage, read> skin: array<u32>;
 @group(0) @binding(5) var<storage, read> bones: array<vec4f>;
 @group(0) @binding(6) var<storage, read> prev: array<f32>;
-// Limbs tested on their own (SdfGrid.limbs): sphere (centre, radius), then the bone index.
+// Limbs tested on their own (SdfGrid.limbs): a capsule — one end of its axis and its radius,
+// then the other end and the bone index.
 @group(0) @binding(7) var<storage, read> limbs: array<vec4f>;
 @group(1) @binding(0) var<uniform> frame: Frame;
 @group(1) @binding(1) var<uniform> substep: Substep;
@@ -317,6 +371,14 @@ export const contactsWGSL = /* wgsl */ `
 ${common}
 ${bodyFieldWGSL}
 
+
+// Squared distance from p to the segment a → b.
+fn toSegment2(p: vec3f, a: vec3f, b: vec3f) -> f32 {
+  let e = b - a;
+  let t = clamp(dot(p - a, e) / max(dot(e, e), 1e-12), 0.0, 1.0);
+  let d = p - a - t * e;
+  return dot(d, d);
+}
 
 // Body contacts, in rest space when the body is animated: restPos holds the
 // rest-space position of the previous substep, so friction acts on the motion
@@ -349,15 +411,27 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var impact = 0.0;
   if (posed && rel > ${IMPACT_SPEED.from.toFixed(2)} * frame.h) {
     for (var l = 0u; l < arrayLength(&limbs) / 2u; l++) {
-      let sphere = limbs[2u * l];
-      let c = q - sphere.xyz;
-      if (dot(c, c) <= sphere.w * sphere.w) {
+      let capsule = limbs[2u * l];
+      if (toSegment2(q, capsule.xyz, limbs[2u * l + 1u].xyz) <= capsule.w * capsule.w) {
         impact = smoothstep(${IMPACT_SPEED.from.toFixed(2)}, ${IMPACT_SPEED.to.toFixed(2)}, rel / frame.h);
         break;
       }
     }
   }
-  let offset = frame.offset + impact * min(${IMPACT_MARGIN.max}, ${IMPACT_MARGIN.time} / frame.h * rel);
+  let margin = frame.offset + impact * min(${IMPACT_MARGIN.max}, ${IMPACT_MARGIN.time} / frame.h * rel);
+  // The margin stops the cloth where it comes in. Cloth already nearer is pushed back out to it
+  // by skin that moves fast itself — a runner's forearm —, else only kept from coming nearer
+  // still (posedBody.ts IMPACT_MARGIN).
+  var before = 1e9;
+  var offset = frame.offset;
+  if (impact > 0.0) {
+    before = sampleSdf(r);
+    // The skin's own motion over the substep: the cloth's, less its motion relative to the skin.
+    let start = vec3f(prev[3u * i], prev[3u * i + 1u], prev[3u * i + 2u]);
+    let skin = length(p0 - start - (applyAffine(a, q) - applyAffine(a, r))) / frame.h;
+    let held = max(frame.offset, min(margin, before));
+    offset = mix(held, margin, smoothstep(${IMPACT_SPEED.from.toFixed(2)}, ${IMPACT_SPEED.to.toFixed(2)}, skin));
+  }
   var p = p0;
   if (posed && !free && d >= offset) {
     // No contact where the vertex comes from: a limb swung far from its rest place may still be
@@ -367,12 +441,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     var hit = vec3f(0.0);
     var hitA: Affine;
     for (var l = 0u; l < arrayLength(&limbs) / 2u; l++) {
-      let sphere = limbs[2u * l];
-      let bi = substep.bones + 3u * u32(limbs[2u * l + 1u].x);
+      let capsule = limbs[2u * l];
+      let tip = limbs[2u * l + 1u];
+      let bi = substep.bones + 3u * u32(tip.w);
       let bone = Affine(bones[bi], bones[bi + 1u], bones[bi + 2u]);
-      // The sphere as posed (the limb's bone is rigid): a cheap first test.
-      let away = p0 - applyAffine(bone, sphere.xyz);
-      if (dot(away, away) > sphere.w * sphere.w) { continue; }
+      // The capsule as posed (the limb's bone is rigid): a cheap first test.
+      if (toSegment2(p0, applyAffine(bone, capsule.xyz), applyAffine(bone, tip.xyz)) > capsule.w * capsule.w) { continue; }
       let ql = applyInverse(bone, p0);
       let dl = sampleSdf(ql);
       if (dl >= deepest) { continue; }
@@ -393,7 +467,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let path = q - r;
     var stick = 0.0;
     var entry = q;
-    if (impact > 0.0 && sampleSdf(r) >= offset) {
+    if (impact > 0.0 && before >= offset) {
       var lo = 0.0;
       var hi = 1.0;
       for (var it = 0; it < 5; it++) {
@@ -469,24 +543,32 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   vel[id.x] = (pos[id.x] - prev[id.x]) / frame.h;
 }`;
 
-/** Sum and max of vertex speeds (mm/s, integers) — to detect when the cloth is at rest. */
+/**
+ * How far each vertex has gone since the last measurement — sum and max, in hundredths of a
+ * millimetre — and where it is now, for the next one: to detect when the cloth is at rest.
+ * Not the solver's velocities: a cloth lying still on the body trembles by a few hundredths of
+ * a millimetre a substep, 70 mm/s on average, and goes nowhere.
+ */
 export const motionWGSL = /* wgsl */ `
-@group(0) @binding(0) var<storage, read> vel: array<f32>;
-@group(0) @binding(1) var<storage, read_write> motion: array<atomic<u32>>;
+@group(0) @binding(0) var<storage, read> pos: array<f32>;
+@group(0) @binding(1) var<storage, read_write> seen: array<f32>;
+@group(0) @binding(2) var<storage, read_write> motion: array<atomic<u32>>;
 @compute @workgroup_size(${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
-  if (3u * id.x >= arrayLength(&vel)) { return; }
-  let v = vec3f(vel[3u * id.x], vel[3u * id.x + 1u], vel[3u * id.x + 2u]);
-  let mm = u32(min(length(v) * 1000.0 + 0.5, 1e6));
-  atomicAdd(&motion[0], mm);
-  atomicMax(&motion[1], mm);
+  let i = 3u * id.x;
+  if (i >= arrayLength(&pos)) { return; }
+  let p = vec3f(pos[i], pos[i + 1u], pos[i + 2u]);
+  let gone = u32(min(distance(p, vec3f(seen[i], seen[i + 1u], seen[i + 2u])) * 1e5 + 0.5, 1e5));
+  seen[i] = p.x; seen[i + 1u] = p.y; seen[i + 2u] = p.z;
+  atomicAdd(&motion[0], gone);
+  atomicMax(&motion[1], gone);
 }`;
 
 // --- Self-collisions (see lib/sim/selfCollision.ts) ---------------------------------
 // Hash tables: 2 words per bucket, [count, start]; entries: primitive ids sorted by bucket.
 // tangle (untangle.ts): per vertex correction direction (xyz) and region label (w; < 0: released).
 
-const substepStruct = "struct Substep { gravity: f32, sewK: f32, sewing: u32, posed: u32, bones: u32, selfActive: u32, pad1: u32, pad2: u32 }";
+const substepStruct = "struct Substep { gravity: f32, sewK: f32, sewing: u32, posed: u32, bones: u32, selfActive: u32, claspGoal: f32, pad2: u32 }";
 
 const selfCommon = /* wgsl */ `
 struct SelfParams { triCell: f32, edgeCell: f32, distance: f32, reach: f32, edgeGrow: f32, mask: u32, pad0: u32, pad1: u32 }

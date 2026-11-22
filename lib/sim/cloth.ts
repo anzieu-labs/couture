@@ -1,17 +1,28 @@
 import { BONE_STRIDE } from "../avatar/skeleton";
 import { LIMB_STRIDE, type BodySdf } from "./bodySdf";
 import { GRAB, selfInterval, solveGrab, type GrabPatch } from "./grab";
-import { assembling, PLINTH, substepState, sweepPlan, type ClothModel, type Sweep } from "./model";
+import { assembling, bandLimit, BELT, PLINTH, substepState, sweepPlan, type ClothModel, type Sweep } from "./model";
 import { applyAffine, applyInverse, blendAt, IMPACT_MARGIN, IMPACT_SPEED, POSE_TOLERANCE } from "./posedBody";
 import { SelfCollider, UNTANGLE_INTERVAL } from "./selfCollision";
 import { findTangles } from "./untangle";
 
 /**
- * Body pose at a simulated time: writes the bone transforms into `out` and
- * returns false when the body is in its rest pose.
+ * Body pose at a simulated time: writes the bone transforms into `out`, from the pose the
+ * collision field was built in (the standing pose: avatar/motion.ts), and returns false when
+ * the body is in that pose.
  */
 export type PoseAt = (time: number, out: Float32Array) => boolean;
 
+
+/** Squared distance from the point (x, y, z) to the segment whose ends are at `a` and `b` in `ends`. */
+function toSegment2(x: number, y: number, z: number, ends: ArrayLike<number>, a: number, b: number): number {
+  const ex = ends[b] - ends[a], ey = ends[b + 1] - ends[a + 1], ez = ends[b + 2] - ends[a + 2];
+  const px = x - ends[a], py = y - ends[a + 1], pz = z - ends[a + 2];
+  const l2 = ex * ex + ey * ey + ez * ez;
+  const t = l2 > 0 ? Math.min(1, Math.max(0, (px * ex + py * ey + pz * ez) / l2)) : 0;
+  const dx = px - t * ex, dy = py - t * ey, dz = pz - t * ez;
+  return dx * dx + dy * dy + dz * dz;
+}
 
 /**
  * Reference CPU implementation of the XPBD solver ("small steps": many
@@ -26,15 +37,15 @@ export class CpuClothSolver {
   private readonly edgeLambda: Float32Array;
   private readonly bendLambda: Float32Array;
   private readonly grad = new Float32Array(3);
-  /** Rest-space position of each vertex at the end of the last substep (animated body). */
+  /** Position of each vertex in the collision field's pose at the end of the last substep (animated body). */
   private readonly restPos: Float32Array;
   private readonly blend = new Float64Array(12);
   private readonly blend0 = new Float64Array(12);
   /** Scratch: a limb's bone transform, and the blended transform of the deepest limb contact. */
   private readonly limbBone = new Float64Array(12);
   private readonly limbBlend = new Float64Array(12);
-  /** Scratch: centre of each limb's sphere as posed (3 per limb). */
-  private readonly limbCentre: Float64Array;
+  /** Scratch: the two ends of each limb's capsule as posed (6 per limb). */
+  private readonly limbEnds: Float64Array;
   private readonly q = new Float64Array(3);
   private readonly q0 = new Float64Array(3);
   /** Current bone transforms (when posed). */
@@ -47,17 +58,14 @@ export class CpuClothSolver {
   /** Simulated time until which the cloth let go is still falling back. */
   private heldUntil = -Infinity;
 
-  /**
-   * `initial`: positions around the body's rest pose (the collision space); `start`: where
-   * the cloth starts, around the body as posed at time 0 (default: the same).
-   */
-  constructor(private readonly m: ClothModel, initial: Float32Array, private readonly sdf: BodySdf, boneCount = 0, start: Float32Array = initial) {
-    this.pos = Float32Array.from(start);
-    this.prev = Float32Array.from(start);
+  /** `initial`: where the cloth starts, around the body the collision field `sdf` was built from. */
+  constructor(private readonly m: ClothModel, initial: Float32Array, private readonly sdf: BodySdf, boneCount = 0) {
+    this.pos = Float32Array.from(initial);
+    this.prev = Float32Array.from(initial);
     this.restPos = Float32Array.from(initial);
     this.bones = sdf.skin && boneCount ? new Float32Array(12 * boneCount) : null;
-    this.limbCentre = new Float64Array((3 * sdf.limbs.length) / LIMB_STRIDE);
-    this.self = m.self ? new SelfCollider(m.self, m.triangles, start) : null;
+    this.limbEnds = new Float64Array((6 * sdf.limbs.length) / LIMB_STRIDE);
+    this.self = m.self ? new SelfCollider(m.self, m.triangles, initial) : null;
     this.vel = new Float32Array(initial.length);
     this.edgeLambda = new Float32Array(m.edgeRest.length);
     this.bendLambda = new Float32Array(m.bendCompliance.length * 3);
@@ -87,7 +95,7 @@ export class CpuClothSolver {
     const plans = assembling(p, this.time) ? this.sweeps.assembling : this.sweeps.draping;
     const selfEvery = selfInterval(p, !!grab || this.time < this.heldUntil);
     for (let s = 0; s < p.substeps; s++) {
-      const { gravity, sewK, sewing, selfActive } = substepState(p, this.time);
+      const { gravity, sewK, sewing, selfActive, claspGoal } = substepState(p, this.time);
       const posed = !!(poseAt && this.bones && poseAt(this.time + h, this.bones));
       for (let i = 0; i < m.vertexCount; i++) {
         if (!invMass[i]) continue;
@@ -108,9 +116,9 @@ export class CpuClothSolver {
       for (const { reverse, bending } of plans[s & 1]) {
         this.solveStretch(h, reverse);
         if (bending) this.solveBending(h, reverse);
-        this.solveSeams(sewK, reverse);
+        this.solveSeams(sewK, claspGoal, reverse);
       }
-      this.solveBands();
+      this.solveBands(this.time);
       if (this.self && (s + 1) % selfEvery === 0) {
         if (selfActive && this.time - this.untangledAt >= UNTANGLE_INTERVAL) {
           this.untangledAt = this.time;
@@ -175,19 +183,68 @@ export class CpuClothSolver {
   }
 
   /** Bands (model.ts BandModel): a band longer than its rest length is scaled down about its centre of mass. */
-  private solveBands() {
+  /** A belt (model.ts BELT) round the vertices v0…vEnd of the bands' list, no longer than `limit`. */
+  private solveBelt(v0: number, vEnd: number, limit: number) {
     const { pos } = this;
-    const { invMass } = this.m;
-    const { ranges, rest, segments, vertices } = this.m.bands;
-    for (let b = 0; b < rest.length; b++) {
+    const { invMass, bands } = this.m;
+    const K = BELT.sectors, far = this.beltFar, at = this.beltAt;
+    let cx = 0, cz = 0, mass = 0;
+    for (let k = v0; k < vEnd; k++) {
+      const v = bands.vertices[k], w = invMass[v];
+      if (!w) continue;
+      cx += pos[3 * v] / w; cz += pos[3 * v + 2] / w;
+      mass += 1 / w;
+    }
+    if (!mass) return;
+    cx /= mass; cz /= mass;
+    far.fill(-1);
+    for (let k = v0; k < vEnd; k++) {
+      const v = bands.vertices[k], dx = pos[3 * v] - cx, dz = pos[3 * v + 2] - cz;
+      const s = Math.min(K - 1, Math.floor(((Math.atan2(dz, dx) + Math.PI) / (2 * Math.PI)) * K)), r = dx * dx + dz * dz;
+      if (r > far[s]) {
+        far[s] = r;
+        at[s] = v;
+      }
+    }
+    let round = 0, first = -1, last = -1;
+    for (let s = 0; s < K; s++) {
+      if (far[s] < 0) continue;
+      if (last >= 0) round += Math.hypot(pos[3 * at[s]] - pos[3 * last], pos[3 * at[s] + 2] - pos[3 * last + 2]);
+      else first = at[s];
+      last = at[s];
+    }
+    if (first < 0) return;
+    round += Math.hypot(pos[3 * first] - pos[3 * last], pos[3 * first + 2] - pos[3 * last + 2]);
+    if (round <= limit) return; // a belt does not push
+    const scale = limit / round;
+    for (let k = v0; k < vEnd; k++) {
+      const v = bands.vertices[k];
+      if (!invMass[v]) continue;
+      pos[3 * v] = cx + (pos[3 * v] - cx) * scale;
+      pos[3 * v + 2] = cz + (pos[3 * v + 2] - cz) * scale;
+    }
+  }
+  private readonly beltFar = new Float64Array(BELT.sectors);
+  private readonly beltAt = new Int32Array(BELT.sectors);
+
+  private solveBands(time: number) {
+    const { pos } = this;
+    const { invMass, bands, params } = this.m;
+    const { ranges, segments, vertices } = bands;
+    for (let b = 0; b < bands.rest.length; b++) {
+      const limit = bandLimit(bands, b, params, time);
       const seg0 = 2 * ranges[4 * b], segEnd = seg0 + 2 * ranges[4 * b + 1], v0 = ranges[4 * b + 2], vEnd = v0 + ranges[4 * b + 3];
+      if (seg0 === segEnd) {
+        this.solveBelt(v0, vEnd, limit);
+        continue;
+      }
       let length = 0;
       for (let k = seg0; k < segEnd; k += 2) {
         const a = 3 * segments[k], c = 3 * segments[k + 1];
         const dx = pos[a] - pos[c], dy = pos[a + 1] - pos[c + 1], dz = pos[a + 2] - pos[c + 2];
         length += Math.sqrt(dx * dx + dy * dy + dz * dz);
       }
-      if (length <= rest[b]) continue; // a band does not push: the fabric may gather along it
+      if (length <= limit) continue; // a band does not push: the fabric may gather along it
       let cx = 0, cy = 0, cz = 0, mass = 0;
       for (let k = v0; k < vEnd; k++) {
         const v = vertices[k], w = invMass[v];
@@ -197,7 +254,7 @@ export class CpuClothSolver {
       }
       if (!mass) continue;
       cx /= mass; cy /= mass; cz /= mass;
-      const scale = rest[b] / length;
+      const scale = limit / length;
       for (let k = v0; k < vEnd; k++) {
         const v = vertices[k];
         if (!invMass[v]) continue;
@@ -208,7 +265,7 @@ export class CpuClothSolver {
     }
   }
 
-  private solveSeams(sewK: number, reverse: boolean) {
+  private solveSeams(sewK: number, claspGoal: number, reverse: boolean) {
     const { pos } = this;
     const { invMass, seams, seamStart } = this.m;
     const n = seamStart.length;
@@ -219,7 +276,8 @@ export class CpuClothSolver {
       const wa = invMass[a], wb = invMass[b], w = wa + wb;
       const dx = pos[3 * a] - pos[3 * b], dy = pos[3 * a + 1] - pos[3 * b + 1], dz = pos[3 * a + 2] - pos[3 * b + 2];
       const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const target = seamStart[s] * sewK;
+      // A clasp (negative start) is fastened once the garment is on (model.ts CLASP).
+      const target = seamStart[s] < 0 ? claspGoal : seamStart[s] * sewK;
       if (len <= target || len < 1e-9 || !w) continue;
       const f = (len - target) / (len * w);
       pos[3 * a] -= dx * f * wa; pos[3 * a + 1] -= dy * f * wa; pos[3 * a + 2] -= dz * f * wa;
@@ -236,12 +294,14 @@ export class CpuClothSolver {
     const { pos, prev, restPos: r, sdf, grad, blend: M, blend0: M0, q, q0 } = this;
     const { params: p, onSeam } = this.m;
     const base = p.skinGap + p.thickness / 2;
-    // Centres of the limbs' spheres as posed (the limb's bone is rigid): a cheap first test.
-    const L = sdf.limbs, LC = this.limbCentre;
+    // The limbs' capsules as posed (the limb's bone is rigid): a cheap first test.
+    const L = sdf.limbs, LE = this.limbEnds;
     if (posed)
       for (let l = 0; l < L.length; l += LIMB_STRIDE) {
-        const o = L[l + 4] * BONE_STRIDE, b = this.bones!;
-        for (let a = 0; a < 3; a++) LC[(3 * l) / LIMB_STRIDE + a] = b[o + 4 * a] * L[l] + b[o + 4 * a + 1] * L[l + 1] + b[o + 4 * a + 2] * L[l + 2] + b[o + 4 * a + 3];
+        const o = L[l + 7] * BONE_STRIDE, b = this.bones!, e = (6 * l) / LIMB_STRIDE;
+        for (let end = 0; end < 2; end++)
+          for (let a = 0; a < 3; a++)
+            LE[e + 3 * end + a] = b[o + 4 * a] * L[l + 4 * end] + b[o + 4 * a + 1] * L[l + 4 * end + 1] + b[o + 4 * a + 2] * L[l + 4 * end + 2] + b[o + 4 * a + 3];
       }
     for (let i = 0; i < pos.length; i += 3) {
       let consistent = true;
@@ -269,24 +329,37 @@ export class CpuClothSolver {
       let impact = 0;
       if (posed && rel > IMPACT_SPEED.from * h) {
         for (let l = 0; l < L.length; l += LIMB_STRIDE) {
-          const dx = qx - L[l], dy = qy - L[l + 1], dz = qz - L[l + 2];
-          if (dx * dx + dy * dy + dz * dz > L[l + 3] * L[l + 3]) continue;
+          if (toSegment2(qx, qy, qz, L, l, l + 4) > L[l + 3] * L[l + 3]) continue;
           const k = Math.min(1, (rel / h - IMPACT_SPEED.from) / (IMPACT_SPEED.to - IMPACT_SPEED.from));
           impact = k * k * (3 - 2 * k);
           break;
         }
       }
-      const offset = base + impact * Math.min(IMPACT_MARGIN.max, (IMPACT_MARGIN.time / h) * rel);
+      const margin = base + impact * Math.min(IMPACT_MARGIN.max, (IMPACT_MARGIN.time / h) * rel);
+      // The margin stops the cloth where it comes in. Cloth already nearer is pushed back out to
+      // it by skin that moves fast itself — a runner's forearm —, else only kept from coming
+      // nearer still (posedBody.ts IMPACT_MARGIN).
+      let offset = base, before = Infinity;
+      if (impact > 0) {
+        before = sdf.sample(r[i], r[i + 1], r[i + 2]);
+        // The skin's own motion over the substep: the cloth's, less its motion relative to the skin.
+        const ux = qx - r[i], uy = qy - r[i + 1], uz = qz - r[i + 2];
+        const sx = pos[i] - prev[i] - (M[0] * ux + M[1] * uy + M[2] * uz);
+        const sy = pos[i + 1] - prev[i + 1] - (M[4] * ux + M[5] * uy + M[6] * uz);
+        const sz = pos[i + 2] - prev[i + 2] - (M[8] * ux + M[9] * uy + M[10] * uz);
+        const k = Math.min(1, Math.max(0, (Math.sqrt(sx * sx + sy * sy + sz * sz) / h - IMPACT_SPEED.from) / (IMPACT_SPEED.to - IMPACT_SPEED.from)));
+        const held = Math.max(base, Math.min(margin, before));
+        offset = held + (margin - held) * k * k * (3 - 2 * k);
+      }
       if (posed && !free && d >= offset) {
         // No contact where the vertex comes from: a limb swung far from its rest place may still
         // be going through it (posedBody.ts). The deepest one pushes it out.
         const B = this.limbBone, ML = this.limbBlend;
         let deepest = offset, hx = 0, hy = 0, hz = 0;
         for (let l = 0; l < L.length; l += LIMB_STRIDE) {
-          const c = (3 * l) / LIMB_STRIDE;
-          const rx = pos[i] - LC[c], ry = pos[i + 1] - LC[c + 1], rz = pos[i + 2] - LC[c + 2];
-          if (rx * rx + ry * ry + rz * rz > L[l + 3] * L[l + 3]) continue;
-          const o = L[l + 4] * BONE_STRIDE;
+          const e = (6 * l) / LIMB_STRIDE;
+          if (toSegment2(pos[i], pos[i + 1], pos[i + 2], LE, e, e + 3) > L[l + 3] * L[l + 3]) continue;
+          const o = L[l + 7] * BONE_STRIDE;
           for (let e = 0; e < BONE_STRIDE; e++) B[e] = this.bones![o + e];
           applyInverse(B, pos[i], pos[i + 1], pos[i + 2], q0);
           const dl = sdf.sample(q0[0], q0[1], q0[2]);
@@ -313,7 +386,7 @@ export class CpuClothSolver {
         // (rest space: the path is the motion of the cloth relative to the skin).
         const ux = qx - r[i], uy = qy - r[i + 1], uz = qz - r[i + 2];
         let stick = 0, ex = 0, ey = 0, ez = 0;
-        if (impact > 0 && sdf.sample(r[i], r[i + 1], r[i + 2]) >= offset) {
+        if (impact > 0 && before >= offset) {
           let lo = 0, hi = 1;
           for (let it = 0; it < 5; it++) {
             const mid = (lo + hi) / 2;

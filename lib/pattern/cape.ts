@@ -1,5 +1,5 @@
 import { cubic, polylineLength, type P2 } from "./curves";
-import { KAPPA, mirror, mirrorEdges, NO_EDITS, PointSet, type BodyMeasures, type Edge, type Pattern, type PatternEdits, type Piece, type Seam, type SeamSide } from "./types";
+import { KAPPA, mirror, mirrorEdges, NO_EDITS, PointSet, type BodyMeasures, type Clasp, type Edge, type Pattern, type PatternEdits, type Piece, type Seam, type SeamSide } from "./types";
 
 /**
  * Magician's cape: a full circle open at the front, with a two-piece hood.
@@ -10,7 +10,9 @@ import { KAPPA, mirror, mirrorEdges, NO_EDITS, PointSet, type BodyMeasures, type
  * same origin (the centre of the circle): radius r1 = neckline, r2 = hem. Back:
  * centre back along −y, shoulders along ±x. Fronts: shoulder along ±x, centre
  * front near −y. A full circle being flat, it is laid horizontally at the base
- * of the neck before sewing (lib/garment/place.ts) and falls into its drape.
+ * of the neck before sewing (lib/garment/place.ts) and falls into its drape. A clasp at
+ * the neck (CAPE_CLASPS) holds the two fronts together: friction alone lets the cape slip
+ * off the shoulders as soon as the body walks.
  *
  * Hood: u from the face edge towards the back, v up from the neck edge. Its neck
  * edge is sewn to the cape's neckline and split at the shoulder seam (front /
@@ -32,6 +34,15 @@ export interface CapeParams {
 
 export const DEFAULT_CAPE: CapeParams = { length: 0, neckEase: 6, hoodHeight: 8, hoodDepth: 10, hoodPoint: 8 };
 
+/**
+ * The clasp the cape comes with: the two fronts fastened at the neck, by their neckline
+ * corners at the centre front (the end of the left front's neck edge; the right front being
+ * its mirror image, the start of its own). Like any clasp, the user may remove it.
+ */
+export const CAPE_CLASPS: readonly Clasp[] = [
+  { a: { piece: "front+", edge: "neck", t: 1, offset: [0, 0] }, b: { piece: "front-", edge: "neck", t: 0, offset: [0, 0] } },
+];
+
 /** Automatic length: to mid-calf. */
 export const capeAutoLength = (m: BodyMeasures) => Math.round(m.hpsToFloor - 34);
 
@@ -40,8 +51,20 @@ const FRONT = ((90 - 5) * Math.PI) / 180;
 
 const renameSide = (edges: Edge[]): Edge[] => edges.map((e) => ({ ...e, id: e.id.replace(/\+$/, "-") }));
 
-export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: PatternEdits = NO_EDITS): Pattern {
-  const L = p.length > 0 ? p.length : capeAutoLength(b);
+/** What makes a garment of this block: its name, whether it has a hood, and its length when left automatic. */
+export interface CapeStyle {
+  name: string;
+  hood: boolean;
+  autoLength: (b: BodyMeasures) => number;
+}
+
+export const CAPE: CapeStyle = { name: "Cape à capuche", hood: true, autoLength: capeAutoLength };
+
+/** A capelet's automatic length: to the elbow. */
+export const capeletAutoLength = (b: BodyMeasures) => Math.round(0.55 * b.armLength + 8);
+
+export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: PatternEdits = NO_EDITS, style: CapeStyle = CAPE): Pattern {
+  const L = p.length > 0 ? p.length : style.autoLength(b);
   const neckline = b.neck + p.neckEase;
   const r1 = neckline / (Math.PI + 2 * FRONT);
   const r2 = r1 + L;
@@ -170,12 +193,13 @@ export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: 
     };
   };
 
-  const pieces = [back, front("+"), front("-"), hood("+"), hood("-")];
+  const pieces = style.hood ? [back, front("+"), front("-"), hood("+"), hood("-")] : [back, front("+"), front("-")];
   const side = (piece: string, edge: string, reverse = false): SeamSide => ({ piece, edge, reverse });
   const seams: Seam[] = [];
   for (const s of ["+", "-"] as const) {
+    seams.push({ id: `shoulder${s}`, a: side("back", `shoulder${s}`), b: side(`front${s}`, "shoulder") });
+    if (!style.hood) continue;
     seams.push(
-      { id: `shoulder${s}`, a: side("back", `shoulder${s}`), b: side(`front${s}`, "shoulder") },
       // hood neck (centre front → shoulder) ↔ front neckline (shoulder → centre front)
       { id: `neckFront${s}`, a: side(`hood${s}`, "neckFront"), b: side(`front${s}`, "neck", true) },
       // hood neck (shoulder → nape) ↔ back neckline (shoulder → centre back), same direction
@@ -183,34 +207,45 @@ export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: 
       { id: `neckBack${s}`, a: side(`hood${s}`, "neckBack"), b: side("back", `neck${s}`) },
     );
   }
-  seams.push({ id: "hood", a: side("hood+", "back"), b: side("hood-", "back", true) });
-  // Match mark half-way up the hood seam, on both halves.
-  pieces[3].notches.push({ edge: "back", t: 0.5, count: 1 });
-  pieces[4].notches.push({ edge: "back", t: 0.5, count: 1 });
+  if (style.hood) {
+    seams.push({ id: "hood", a: side("hood+", "back"), b: side("hood-", "back", true) });
+    // Match mark half-way up the hood seam, on both halves.
+    pieces[3].notches.push({ edge: "back", t: 0.5, count: 1 });
+    pieces[4].notches.push({ edge: "back", t: 0.5, count: 1 });
+  }
 
   return {
     kind: "cape",
-    name: "Cape à capuche",
+    name: style.name,
     pieces,
     seams,
-    handles: [...bp.handles, ...fp.handles, ...hp.handles],
+    handles: [...bp.handles, ...fp.handles, ...(style.hood ? hp.handles : [])],
     dims: [
       { label: "Longueur", value: L },
       { label: "Encolure", value: 2 * (nf + nb) },
       { label: "Tour du bas", value: 2 * (polylineLength(backPlus[0].pts) + polylineLength(frontEdges[0].pts)) },
-      { label: "Hauteur capuche", value: Math.max(T[1], P[1]) },
-      { label: "Profondeur capuche", value: Math.max(K[0], P[0]) },
-      { label: "Couture capuche", value: polylineLength(backSeam) },
+      ...(style.hood
+        ? [
+            { label: "Hauteur capuche", value: Math.max(T[1], P[1]) },
+            { label: "Profondeur capuche", value: Math.max(K[0], P[0]) },
+            { label: "Couture capuche", value: polylineLength(backSeam) },
+          ]
+        : []),
     ],
     sizeNote: `longueur ${L.toFixed(0)} cm · encolure ${neckline.toFixed(0)} cm`,
     checks: [
-      { seam: "neckFront+", label: "Encolure devant", kind: "match" },
-      { seam: "neckBack+", label: "Encolure dos", kind: "match" },
+      ...(style.hood
+        ? ([
+            { seam: "neckFront+", label: "Encolure devant", kind: "match" },
+            { seam: "neckBack+", label: "Encolure dos", kind: "match" },
+          ] as const)
+        : []),
       { seam: "shoulder+", label: "Épaule", kind: "match" },
     ],
     sim: {
-      // ~11 000 vertices on the GPU instead of ~58 000 at the t-shirt's resolution.
-      spacingScale: 2.2,
+      // ~11 000 vertices on the GPU instead of ~58 000 at the t-shirt's resolution; a capelet
+      // is a fifth of the cloth, and gets a finer mesh.
+      spacingScale: L < 70 ? 1.4 : 2.2,
       fallRoom: 2,
       // The flat circle swings down from the shoulders like a pendulum: overdamped, it
       // reaches the vertical without overshooting, so the hem does not whip in under

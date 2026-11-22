@@ -1,18 +1,19 @@
 import { measureForPattern, type TorsoFrame } from "../../lib/avatar/bodyMeasures";
 import { measureBody } from "../../lib/avatar/measure";
-import { Animator, CADENCE, MOTION_DELAY, type Posture } from "../../lib/avatar/motion";
+import { Animator, CADENCE, MOTION_DELAY, standingBody, type Posture } from "../../lib/avatar/motion";
 import { BONE_STRIDE, Skeleton, skinVertices } from "../../lib/avatar/skeleton";
 import { prepareGarment } from "../../lib/garment/prepare";
 import type { DressRequest } from "../../lib/garment/protocol";
 import { garmentDef } from "../../lib/pattern/garments";
-import { NO_EDITS, type BodyMeasures, type GarmentKind } from "../../lib/pattern/types";
+import { withBelts } from "../../lib/pattern/belt";
+import { NO_EDITS, type Belt, type BodyMeasures, type Clasp } from "../../lib/pattern/types";
 import { BodySdf } from "../../lib/sim/bodySdf";
 import { CpuClothSolver } from "../../lib/sim/cloth";
 import { grabPoint, selectGrab } from "../../lib/sim/grab";
 import { floorAt, RestDetector, SELF_DELAY, type ClothParams } from "../../lib/sim/model";
 import { TEXTILES } from "../../lib/textiles/catalog";
 import { loadMannequin, vertexNormals } from "./mannequin";
-import { crossings, penetration, segmentsThrough, speed, strain, type Strain } from "./metrics";
+import { crossings, penetration, segmentsThrough, skinThrough, speed, strain, type Strain } from "./metrics";
 
 const FRAME_DT = 1 / 60;
 /** Frames timed at the end of a run: the drape at rest, or the motion under way. */
@@ -24,19 +25,23 @@ export interface Body {
   torso: TorsoFrame;
 }
 
-/** The default mannequin, as the app builds it (GarmentViewer.setBody + dress). */
-export function loadBody(root: string): Body {
+/**
+ * The mannequin as the app builds it (GarmentViewer.setBody + dress): the default one, or with
+ * some of its parameters changed (lib/avatar/anny.ts Phenotype, e.g. { weight: 0 }: thin).
+ */
+export function loadBody(root: string, phenotype: Record<string, number> = {}): Body {
   const anny = loadMannequin(root);
-  const shape = anny.compute(anny.defaults());
+  const shape = anny.compute({ ...anny.defaults(), ...phenotype });
   const normals = vertexNormals(shape.positions, anny.indices);
   const { measures, torso } = measureForPattern(shape, anny.indices, measureBody(shape, anny.indices));
   const { labels, parents } = anny.meta.bones;
-  return { request: { positions: shape.positions, normals, joints: shape.joints, skin: anny.skin, rig: { labels, parents } }, measures, torso };
+  return { request: { positions: shape.positions, normals, indices: anny.indices, joints: shape.joints, skin: anny.skin, rig: { labels, parents } }, measures, torso };
 }
 
 export interface Scenario {
   name: string;
-  garment: GarmentKind;
+  /** A garment of the catalogue (lib/pattern/garments.ts): its id, or its style — then in the men's cut. */
+  garment: string;
   /** Textile id (lib/textiles/catalog.ts). */
   textile: string;
   /** Mesh and solver preset: the app's GPU settings (fine) or its CPU fallback's (coarse). */
@@ -51,8 +56,14 @@ export interface Scenario {
   posture?: Posture;
   /** Solver parameter overrides. */
   cloth?: Partial<ClothParams>;
-  /** Garment settings other than the defaults (lib/pattern/garments.ts), e.g. { waistband: 40 }. */
+  /** Garment settings other than the defaults (lib/pattern/garments.ts), e.g. { flare: 20 }. */
   garmentParams?: Record<string, number>;
+  /** Clasps on the pattern (lib/pattern/clasp.ts), instead of those the garment comes with; []: none. */
+  clasps?: Clasp[];
+  /** Belts on the pattern (lib/pattern/belt.ts), likewise; []: none — a skirt with no waistband. */
+  belts?: Belt[];
+  /** Mannequin parameters other than the defaults (loadBody), e.g. { weight: 0 }: a thin body. */
+  phenotype?: Record<string, number>;
   /**
    * A hand takes hold of the cloth (lib/sim/grab.ts) at `at` s, at the front of the hem or
    * on the chest, pulls it by `pull` (m) in `ramp` s, holds it for `hold` s and lets go.
@@ -73,6 +84,11 @@ export interface Result {
   crossings: { end: number; mean: number; max: number };
   /** Worst body penetration over the samples. */
   penetration: { count: number; depth: number; close: number };
+  /**
+   * Skin showing through the cloth (metrics.ts skinThrough): body vertices standing out of it at
+   * the end, the most over the samples, and how far the worst one stood out (mm).
+   */
+  skinThrough: { end: number; max: number; depth: number };
   /** How far the top of the garment came down since it was sewn (cm): > a few cm, it slid off. */
   drop: number;
   /**
@@ -123,7 +139,7 @@ export function runScenario(body: Body, sc: Scenario, log: (line: string) => voi
   const textile = TEXTILES.find((t) => t.id === sc.textile);
   if (!textile) throw new Error(`unknown textile ${sc.textile}`);
   const def = garmentDef(sc.garment);
-  const pattern = def.draft(body.measures, { ...def.defaults, ...sc.garmentParams }, NO_EDITS);
+  const pattern = withBelts({ ...def.draft(body.measures, { ...def.defaults, ...sc.garmentParams }, NO_EDITS), clasps: sc.clasps ?? def.clasps }, sc.belts ?? def.belts ?? []);
   const cloth: Partial<ClothParams> = {
     density: textile.weight / 1000,
     bending: textile.bending,
@@ -133,34 +149,37 @@ export function runScenario(body: Body, sc: Scenario, log: (line: string) => voi
     friction: textile.friction,
     ...sc.cloth,
   };
-  const { initial, start, sdf, params, model } = prepareGarment({ mode: sc.mode, pattern, body: body.request, torso: body.torso, cloth });
+  const { initial, sdf, params, model } = prepareGarment({ mode: sc.mode, pattern, body: body.request, torso: body.torso, cloth });
   const b = body.request;
   const skeleton = new Skeleton(b.rig.labels, b.rig.parents, b.joints, b.positions, b.skin);
   const animator = new Animator(skeleton);
+  // The body as shown: standing, then posed from there by the animator's bone transforms.
+  const stand = standingBody(animator, b, b.skin);
   const motionStart = params.sewTime + params.settleTime + MOTION_DELAY;
   animator.holdUntil(motionStart);
   animator.setCadence(sc.cadence ?? CADENCE.default, 0);
   if (sc.posture) animator.setPosture(sc.posture, 0);
   if (sc.walk) animator.setWalking(true, 0);
 
-  const solver = new CpuClothSolver(model, initial, sdf, skeleton.count, start);
+  const solver = new CpuClothSolver(model, initial, sdf, skeleton.count);
   const phaseTime = instrument(solver);
   const poseAt = (t: number, out: Float32Array) => animator.sample(t, out);
   const bones = new Float32Array(skeleton.count * BONE_STRIDE);
   const posed = new Float32Array(b.positions.length), posedNormals = new Float32Array(b.normals.length);
   const clearance = params.skinGap + params.thickness / 2;
 
-  /** Independent distance field of the body as posed at time t, around the garment. */
+  /** Independent distance field of the body as posed at time t (the body as shown), around the garment. */
   const bodyField = (t: number, pos: Float32Array) => {
     const moved = animator.sample(t, bones);
-    if (moved) skinVertices(b.positions, b.normals, b.skin, bones, posed, posedNormals);
+    if (moved) skinVertices(stand.positions, stand.normals, b.skin, bones, posed, posedNormals);
     const min: [number, number, number] = [Infinity, Infinity, Infinity], max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
     for (let i = 0; i < pos.length; i += 3)
       for (let a = 0; a < 3; a++) {
         min[a] = Math.min(min[a], pos[i + a] - 0.03);
         max[a] = Math.max(max[a], pos[i + a] + 0.03);
       }
-    return new BodySdf(moved ? posed : b.positions, moved ? posedNormals : b.normals, min, max, 0.008, 0.04);
+    // Exact distances to the skin's triangles (BodySdf EXACT_BAND), on a finer grid than the solver's.
+    return new BodySdf(moved ? posed : stand.positions, moved ? posedNormals : stand.normals, min, max, 0.008, 0.04, undefined, undefined, [], b.indices);
   };
 
   const frames = Math.round(sc.duration / FRAME_DT);
@@ -173,13 +192,15 @@ export function runScenario(body: Body, sc: Scenario, log: (line: string) => voi
   const cross: number[] = [];
   let strainP99Max = 0;
   const pen = { count: 0, depth: 0, close: 0 };
+  const skin = { end: 0, max: 0, depth: 0 };
+  const halfThickness = Math.max(0.0005, params.thickness) / 2; // as rendered (viewer/shellTopology.ts)
   // Limb segments: joint to joint, and from the wrist / ankle to the farthest point of the hand / foot.
   const tip = (label: string) => {
-    const k = skeleton.index[label], h = skeleton.head(label);
+    const k = skeleton.index[label], h = stand.joints[label];
     let best = -1, far = 0;
-    for (let v = 0; v < b.positions.length / 3; v++) {
+    for (let v = 0; v < stand.positions.length / 3; v++) {
       if (b.skin.index[4 * v] !== k || b.skin.weight[4 * v] < 128) continue;
-      const d = Math.hypot(b.positions[3 * v] - h[0], b.positions[3 * v + 1] - h[1], b.positions[3 * v + 2] - h[2]);
+      const d = Math.hypot(stand.positions[3 * v] - h[0], stand.positions[3 * v + 1] - h[1], stand.positions[3 * v + 2] - h[2]);
       if (d > far) [far, best] = [d, v];
     }
     return best;
@@ -190,10 +211,10 @@ export function runScenario(body: Body, sc: Scenario, log: (line: string) => voi
   ]);
   const limbSegments = (moved: boolean) => {
     const joint = (label: string) => {
-      const h = skeleton.head(label), o = skeleton.index[label] * BONE_STRIDE;
+      const h = stand.joints[label], o = skeleton.index[label] * BONE_STRIDE;
       return moved ? [0, 1, 2].map((r) => bones[o + 4 * r] * h[0] + bones[o + 4 * r + 1] * h[1] + bones[o + 4 * r + 2] * h[2] + bones[o + 4 * r + 3]) : [...h];
     };
-    const body = moved ? posed : b.positions;
+    const body = moved ? posed : stand.positions;
     return limbs.flatMap((l) => {
       const a = joint(l.from), c = joint(l.to);
       return [[...a, ...c], [...c, body[3 * l.tip], body[3 * l.tip + 1], body[3 * l.tip + 2]]];
@@ -251,7 +272,7 @@ export function runScenario(body: Body, sc: Scenario, log: (line: string) => voi
       movedAt = t;
       rest.reset();
     }
-    if (rest.update(solver.pos, FRAME_DT, t > params.sewTime + 0.5 && t > movedAt + 0.5) && restAt === null) restAt = t;
+    if (rest.update(solver.pos, FRAME_DT, t > model.fastenedAt + 0.5 && t > movedAt + 0.5) && restAt === null) restAt = t;
     // The garment's top: the highest 5 % of the vertices just after sewing.
     if (!top && t >= params.sewTime + 0.3) {
       const order = Array.from({ length: model.vertexCount }, (_, i) => i).sort((i, j) => solver.pos[3 * j + 1] - solver.pos[3 * i + 1]);
@@ -265,8 +286,14 @@ export function runScenario(body: Body, sc: Scenario, log: (line: string) => voi
       if (t > params.sewTime + SELF_DELAY + 0.3) {
         cross.push(c);
         strainP99Max = Math.max(strainP99Max, s.p99);
-        const p = penetration(solver.pos, bodyField(t, solver.pos), clearance);
+        const field = bodyField(t, solver.pos);
+        const p = penetration(solver.pos, field, clearance);
         // (bodyField has just posed the body at t.)
+        const shown = animator.sample(t, bones);
+        const showing = skinThrough(solver.pos, model.triangles, shown ? posed : stand.positions, shown ? posedNormals : stand.normals, field, halfThickness, b.indices);
+        skin.end = showing.count;
+        skin.max = Math.max(skin.max, showing.count);
+        skin.depth = Math.max(skin.depth, showing.depth);
         const hits = segmentsThrough(solver.pos, model.triangles, limbSegments(animator.moving(t) || animator.sample(t, bones)));
         through.count++;
         through.triangles += hits;
@@ -296,6 +323,7 @@ export function runScenario(body: Body, sc: Scenario, log: (line: string) => voi
     strainP99Max,
     crossings: { end: cross[cross.length - 1] ?? 0, mean: cross.reduce((s, x) => s + x, 0) / Math.max(1, cross.length), max: Math.max(0, ...cross) },
     penetration: pen,
+    skinThrough: skin,
     drop: top ? (topY0 - topY()) * 100 : 0,
     limbsThrough: { samples: (100 * through.samples) / Math.max(1, through.count), triangles: through.triangles / Math.max(1, through.count) },
     aboveFloor: aboveFloor * 100,

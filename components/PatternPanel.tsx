@@ -5,8 +5,8 @@ import { useMemo, useState } from "react";
 import { download, exportDxf, exportPdf, exportSvg, type ExportOptions } from "@/lib/pattern/export";
 import { cutPieces } from "@/lib/pattern/markings";
 import { layoutRow, pieceBlock, type Prim } from "@/lib/pattern/sheet";
-import type { GarmentDef, GarmentParams } from "@/lib/pattern/garments";
-import type { BodyMeasures, GarmentKind, Pattern } from "@/lib/pattern/types";
+import { CUT_LABELS, type GarmentDef, type GarmentParams } from "@/lib/pattern/garments";
+import type { BodyMeasures, Pattern } from "@/lib/pattern/types";
 import { GarmentPicker } from "./GarmentPicker";
 import { RangeField } from "./RangeField";
 import { seamColor, seamLegend } from "./seamColors";
@@ -15,12 +15,11 @@ import { Section } from "./Section";
 interface Props {
   pattern: Pattern | null;
   garment: GarmentDef;
-  onGarment: (kind: GarmentKind) => void;
+  onGarment: (id: string) => void;
   params: GarmentParams;
   onParams: (p: GarmentParams) => void;
   measures: BodyMeasures | null;
   progress: number;
-  onResew: () => void;
   cutting: ExportOptions;
   onCutting: (o: ExportOptions) => void;
   editorOpen: boolean;
@@ -155,7 +154,7 @@ function ExportSection({ pattern, cutting, onCutting }: { pattern: Pattern | nul
 }
 
 export function PatternPanel({
-  pattern, garment, onGarment, params, onParams, measures, progress, onResew, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
+  pattern, garment, onGarment, params, onParams, measures, progress, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
 }: Props) {
   const simulating = progress > 0 && progress < 1;
   const [picking, setPicking] = useState(false);
@@ -167,7 +166,9 @@ export function PatternPanel({
         <div className="flex items-center gap-3 rounded-xl border border-line bg-white/60 p-2 pr-3">
           <Image src={garment.image} alt="" width={48} height={64} className="h-16 w-12 shrink-0 rounded-lg bg-canvas object-cover" />
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold">{garment.name}</p>
+            <p className="truncate text-sm font-semibold">
+              {garment.name} <span className="font-normal text-muted">· {CUT_LABELS[garment.cut].toLowerCase()}</span>
+            </p>
             <p className="truncate text-[11px] text-muted">{garment.description}</p>
           </div>
           <button
@@ -262,18 +263,8 @@ export function PatternPanel({
 
       <ExportSection pattern={issues.length ? null : pattern} cutting={cutting} onCutting={onCutting} />
 
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={onResew}
-          className="rounded-full bg-ink px-4 py-2 text-xs font-medium text-white transition-opacity hover:opacity-90"
-        >
-          Recoudre
-        </button>
-        <span className="text-[11px] text-muted">
-          {simulating ? `Couture et drapé… ${Math.round(progress * 100)} %` : "Le patron suit la morphologie du mannequin."}
-        </span>
-      </div>
+      {/* The garment is sewn again by itself whenever the pattern, the body or the fabric changes. */}
+      <p className="text-[11px] text-muted">{simulating ? `Couture et drapé… ${Math.round(progress * 100)} %` : "Le patron suit la morphologie du mannequin."}</p>
     </>
   );
 }

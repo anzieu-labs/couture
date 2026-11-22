@@ -11,8 +11,10 @@ import type { SkinWeights } from "./anny";
  * rig only needs the joint positions of the current morphology.
  *
  * Bone transforms are 3×4 affine matrices, row-major, BONE_STRIDE floats per
- * bone: a point rigidly attached to bone k moves from x (rest) to B_k·x.
- * Shared by the viewer (rendering), the CPU solver (worker) and the GPU solver.
+ * bone: a point rigidly attached to bone k moves from x to B_k·x. `Skeleton.pose`
+ * gives them from the morphology's rest pose; the animator (motion.ts) hands them
+ * out from the pose the mannequin stands in — the reference of what is shown and
+ * collided with: the viewer (rendering), the CPU solver (worker) and the GPU solver.
  */
 
 export type Vec3 = [number, number, number];
@@ -66,6 +68,31 @@ export function identityBones(count: number, out: Float32Array = new Float32Arra
     out[o] = out[o + 5] = out[o + 10] = 1;
   }
   return out;
+}
+
+/** Inverses of bone transforms (rigid: [R | t] ↦ [Rᵀ | −Rᵀ·t]), in double precision. */
+export function invertBones(bones: Float32Array): Float64Array {
+  const out = new Float64Array(bones.length);
+  for (let o = 0; o < bones.length; o += BONE_STRIDE)
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) out[o + 4 * i + j] = bones[o + 4 * j + i];
+      out[o + 4 * i + 3] = -(bones[o + i] * bones[o + 3] + bones[o + 4 + i] * bones[o + 7] + bones[o + 8 + i] * bones[o + 11]);
+    }
+  return out;
+}
+
+/** bones[k] ← bones[k] ∘ first[k], bone by bone: `first` is applied first. In place. */
+export function composeBones(bones: Float32Array, first: Float64Array): Float32Array {
+  const m = new Float64Array(BONE_STRIDE);
+  for (let o = 0; o < bones.length; o += BONE_STRIDE) {
+    for (let i = 0; i < 3; i++) {
+      const a0 = bones[o + 4 * i], a1 = bones[o + 4 * i + 1], a2 = bones[o + 4 * i + 2];
+      for (let j = 0; j < 4; j++) m[4 * i + j] = a0 * first[o + j] + a1 * first[o + 4 + j] + a2 * first[o + 8 + j];
+      m[4 * i + 3] += bones[o + 4 * i + 3];
+    }
+    for (let e = 0; e < BONE_STRIDE; e++) bones[o + e] = m[e];
+  }
+  return bones;
 }
 
 // --- Skeleton ----------------------------------------------------------------------

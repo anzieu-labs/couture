@@ -254,6 +254,45 @@ export const TEXTILES: Textile[] = [
   },
 ];
 
+/** Id of the user's own textile (customTextile). */
+export const CUSTOM_TEXTILE = "custom";
+
+/** What a textile looks like: the fields of the procedural material, taken from a textile of the library. */
+const LOOK = ["pattern", "tile", "roughness", "sheen", "sheenRoughness", "normalStrength", "secondary"] as const;
+
+/**
+ * The user's own textile: every field of the technical sheet is theirs to set; its look is
+ * that of a textile of the library (`look`, its id), in their colours. It starts as a copy of
+ * the first one.
+ */
+export function customTextile(from: Textile = TEXTILES[0]): Textile & { look: string } {
+  return { ...from, id: CUSTOM_TEXTILE, name: "Tissu sur mesure", look: from.id };
+}
+
+/** The same textile with the look of another one of the library. */
+export function withLook<T extends Textile>(textile: T, look: string): T & { look: string } {
+  const from = TEXTILES.find((t) => t.id === look) ?? TEXTILES[0];
+  const next = { ...textile, look: from.id } as T & { look: string };
+  for (const k of LOOK) (next as unknown as Record<string, unknown>)[k] = from[k];
+  return next;
+}
+
+/** How a textile hangs, from its bending rigidity (N·m): the library's own words for it. */
+export const drapeOf = (bending: number): Textile["drape"] => (bending < 3e-6 ? "fluide" : bending < 1.2e-5 ? "souple" : bending < 4e-5 ? "structuré" : "rigide");
+
+/**
+ * The numbers of a textile the user sets on their own (the mechanics the cloth is simulated
+ * with): range and unit as shown. The bending rigidity spans three decades: set by its exponent.
+ */
+export const TEXTILE_FIELDS = {
+  weight: { label: "Grammage", min: 40, max: 800, step: 5, unit: "g/m²" },
+  thickness: { label: "Épaisseur", min: 0.1, max: 4, step: 0.05, unit: "mm" },
+  bending: { label: "Rigidité en flexion", min: 0.5e-6, max: 300e-6, unit: "µN·m" },
+  warp: { label: "Élasticité chaîne (colonne)", min: 0, max: 60, step: 1, unit: "%" },
+  weft: { label: "Élasticité trame (rangée)", min: 0, max: 60, step: 1, unit: "%" },
+  friction: { label: "Frottement sur le corps", min: 0.1, max: 1, step: 0.05, unit: "" },
+} as const;
+
 export const PALETTE: { name: string; hex: string }[] = [
   { name: "Blanc cassé", hex: "#f2efe8" },
   { name: "Gris chiné", hex: "#9b9a97" },
