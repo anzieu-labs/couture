@@ -135,6 +135,8 @@ export class GarmentViewer {
   onPatternEdit?: (key: string, move: P2, done: boolean) => void;
   /** The pattern point under the pointer or being dragged on the garment changed. */
   onPatternFocus?: (key: string | null) => void;
+  /** The edge of the pattern under the pointer on the garment changed (`piece/edge`; null: none). */
+  onPatternEdge?: (key: string | null) => void;
 
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
@@ -241,6 +243,7 @@ export class GarmentViewer {
     this.overlay = new PatternOverlay(this.camera, renderer.domElement, this.figure, this.controls, () => [this.pickable(), skin()]);
     this.overlay.onEdit = (key, move, done) => this.onPatternEdit?.(key, move, done);
     this.overlay.onFocus = (key) => this.onPatternFocus?.(key);
+    this.overlay.onEdge = (key) => this.onPatternEdge?.(key);
     this.grabber = new ClothGrab(this.camera, renderer.domElement, this.figure, this.controls, () => this.pickable(), skin);
     this.grabber.onStart = (triangle, point) => this.startGrab(triangle, point);
     this.grabber.onMove = (target) => {

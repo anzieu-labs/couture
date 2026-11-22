@@ -36,6 +36,8 @@ const NO_EDGES: ReadonlySet<string> = new Set();
 type Lines = { mesh: LineSegments2; a: Uint32Array; b: Uint32Array; buffer: Float32Array };
 /** Points on screen (px), as in the 2D editor: half side of an anchor's square, radius of a curve control's disc, outline, picking radius. */
 const POINT_PX = { anchor: 5.5, control: 4.5, rim: 1.5, pick: 13 };
+/** How near the pointer an edge of the pattern must pass to be the one pointed at (pixels). */
+const EDGE_PX = 9;
 /**
  * The marks face the camera this far in front of where they sit (m), along the line of sight —
  * they do not move on screen: a fold or a seam's ridge in front of a point does not hide it,
@@ -90,6 +92,8 @@ export class PatternOverlay {
   readonly group = new THREE.Group();
   /** A point is being dragged: its move so far on the pattern (cm); `done` when released. */
   onEdit?: (key: string, move: P2, done: boolean) => void;
+  /** The edge of the pattern under the pointer changed (`piece/edge`; null: none) — what the 2D editor shows in turn. */
+  onEdge?: (key: string | null) => void;
   /** The point under the pointer or being dragged changed. */
   onFocus?: (key: string | null) => void;
 
@@ -120,11 +124,16 @@ export class PatternOverlay {
 
   private drag: { point: Point; pointer: number; plane: THREE.Plane; start: THREE.Vector3; du: THREE.Vector3; dv: THREE.Vector3; last: P2 } | null = null;
   private hover: string | null = null;
+  private edge: string | null = null;
   private moved: { clientX: number; clientY: number } | null = null;
   private readonly raycaster = new THREE.Raycaster();
   private readonly down = (e: PointerEvent) => this.onDown(e);
   private readonly move = (e: PointerEvent) => this.onMove(e);
   private readonly up = (e: PointerEvent) => this.onUp(e);
+  private readonly leave = () => {
+    this.moved = null;
+    this.setEdge(null);
+  };
 
   /** `occluders`: what may hide a point from the pointer (the cloth, the body), in the figure's frame. */
   constructor(
@@ -142,6 +151,7 @@ export class PatternOverlay {
     dom.addEventListener("pointerup", this.up);
     dom.addEventListener("pointercancel", this.up);
     dom.addEventListener("lostpointercapture", this.up);
+    dom.addEventListener("pointerleave", this.leave);
   }
 
   get visible(): boolean {
@@ -172,6 +182,7 @@ export class PatternOverlay {
     if (!colorOf) {
       this.cancel();
       this.setHover(null);
+      this.setEdge(null);
     }
     this.rebuild();
   }
@@ -241,7 +252,10 @@ export class PatternOverlay {
       p.pick.scale.setScalar(POINT_PX.pick * size);
     }
     if (this.moved && !this.drag) {
-      this.setHover(this.pick(this.moved)?.key ?? null);
+      const point = this.pick(this.moved);
+      this.setHover(point?.key ?? null);
+      // An edge is pointed at where no point is (a point is on an edge).
+      this.setEdge(point ? null : this.pickEdge(this.moved));
       this.moved = null;
     }
   }
@@ -480,6 +494,40 @@ export class PatternOverlay {
     return under.find((p) => nearest.every((d) => d >= p.at.distanceTo(local.origin) - OCCLUSION)) ?? null;
   }
 
+  /**
+   * The edge of the pattern the pointer is on, on the garment: the one that passes nearest to
+   * the pointer's ray on screen, within EDGE_PX — unless cloth or skin lies in front of it
+   * (the back's seams are not pointed at through the front).
+   */
+  private pickEdge(e: { clientX: number; clientY: number }): string | null {
+    const g = this.garment, P = this.positions;
+    if (!this.group.visible || !g || !P) return null;
+    const local = this.ray(e).clone().applyMatrix4(this.figure.matrixWorld.clone().invert());
+    const px = (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / Math.max(1, this.dom.clientHeight);
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), on = new THREE.Vector3();
+    let best: { key: string; pixels: number; distance: number } | null = null;
+    for (const edge of g.outline) {
+      const V = edge.vertices;
+      for (let i = 1; i < V.length; i++) {
+        a.fromArray(P, 3 * V[i - 1]);
+        b.fromArray(P, 3 * V[i]);
+        const apart = Math.sqrt(local.distanceSqToSegment(a, b, undefined, on));
+        const distance = on.distanceTo(local.origin);
+        const pixels = apart / (distance * px || 1);
+        if (pixels <= EDGE_PX && (!best || pixels < best.pixels)) best = { key: `${edge.piece}/${edge.edge}`, pixels, distance };
+      }
+    }
+    if (!best) return null;
+    const nearest = this.occluders().map((m) => (m && raycast(m, local.origin, local.direction)?.distance) ?? Infinity);
+    return nearest.every((d) => d >= best.distance - OCCLUSION) ? best.key : null;
+  }
+
+  private setEdge(key: string | null) {
+    if (key === this.edge) return;
+    this.edge = key;
+    this.onEdge?.(key);
+  }
+
   private onDown(e: PointerEvent) {
     if (this.drag || e.button !== 0 || !e.isPrimary) return;
     const point = this.pick(e);
@@ -566,6 +614,7 @@ export class PatternOverlay {
   }
 
   dispose() {
+    this.dom.removeEventListener("pointerleave", this.leave);
     this.cancel();
     this.clear();
     for (const g of Object.values(this.shapes)) g.dispose();

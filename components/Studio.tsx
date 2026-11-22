@@ -156,6 +156,8 @@ export default function Studio() {
   // its points), and a point can be dragged on either side — `live` holds the drag under way.
   const [live, setLive] = useState<PatternEdits | null>(null);
   const [focus3d, setFocus3d] = useState<string | null>(null);
+  // The edge of the pattern pointed at on the garment in 3D: shown on the 2D pattern too.
+  const [edge3d, setEdge3d] = useState<string | null>(null);
   const overlay = editorOpen && !!garment.measures;
   const { pattern: drafted, edits } = garment;
   useEffect(() => {
@@ -184,8 +186,9 @@ export default function Studio() {
     if (!ready || !viewer) return;
     viewer.onPatternEdit = (key, move, done) => onPatternEdit(key, move, done);
     viewer.onPatternFocus = setFocus3d;
+    viewer.onPatternEdge = setEdge3d;
     return () => {
-      viewer.onPatternEdit = viewer.onPatternFocus = undefined;
+      viewer.onPatternEdit = viewer.onPatternFocus = viewer.onPatternEdge = undefined;
     };
   }, [ready, viewerRef]);
   const focusOnGarment = useCallback((key: string | null) => viewerRef.current?.setPatternFocus(key), [viewerRef]);
@@ -418,6 +421,7 @@ export default function Studio() {
               focusKey={focus3d}
               onFocus={focusOnGarment}
               onHighlight={highlightOnGarment}
+              hoverEdge={edge3d}
               onCommit={garment.commit}
               clasps={garment.clasps}
               onClasps={garment.commitClasps}

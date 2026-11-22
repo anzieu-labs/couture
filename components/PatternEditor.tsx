@@ -26,6 +26,8 @@ interface Props {
   onFocus: (key: string | null) => void;
   /** The edges of the seam pointed at in the list (`piece/edge`), to be shown on the 3D garment too; none: an empty set. */
   onHighlight: (edges: ReadonlySet<string>) => void;
+  /** The edge pointed at on the 3D garment (`piece/edge`), to be shown here as its seam is from the list. */
+  hoverEdge: string | null;
   onCommit: (edits: PatternEdits) => void;
   /** Clasps added on the pattern, and how this editor changes them (the "Fermoir" tool). */
   clasps: readonly Clasp[];
@@ -143,7 +145,7 @@ function shownPieces(pattern: Pattern) {
  * of a drag under way are shared (`live`), whichever side it happens on.
  * Memoised: the studio re-renders with the simulation progress, the editor need not.
  */
-export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onHighlight, onCommit, clasps, onClasps, belts, onBelts, free, onFree, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
+export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onHighlight, hoverEdge, onCommit, clasps, onClasps, belts, onBelts, free, onFree, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
   const liveRef = useRef<PatternEdits | null>(null);
   const shown = live ?? edits;
   const pattern = useMemo(() => garment.draft(measures, params, shown), [garment, measures, params, shown]);
@@ -494,13 +496,18 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   // ---- Drawing.
   const s = view?.s ?? 1;
   const px = (v: number) => v / s; // screen pixels → cm
+  // The seam shown: the one pointed at in the list, or the one the edge pointed at on the 3D garment belongs to.
+  const sideKey = (sd: { piece: string; edge: string }) => `${sd.piece}/${sd.edge}`;
+  const seamBase = (id: string) => id.replace(/[+-]$/, "");
+  const seam3d = hoverEdge ? pattern.seams.find((seam) => sideKey(seam.a) === hoverEdge || sideKey(seam.b) === hoverEdge) : undefined;
+  const shownSeam = hoverSeam ?? (seam3d ? seamBase(seam3d.id) : null);
   const highlighted = useMemo(() => {
-    if (!hoverSeam) return NO_HIGHLIGHT;
+    // A free edge pointed at in 3D (a hem, a neckline) is shown on its own.
+    if (!shownSeam) return hoverEdge ? new Set([hoverEdge]) : NO_HIGHLIGHT;
     const out = new Set<string>();
-    for (const seam of pattern.seams)
-      if (seam.id.replace(/[+-]$/, "") === hoverSeam) for (const sd of [seam.a, seam.b]) out.add(`${sd.piece}/${sd.edge}`);
+    for (const seam of pattern.seams) if (seamBase(seam.id) === shownSeam) for (const sd of [seam.a, seam.b]) out.add(sideKey(sd));
     return out;
-  }, [hoverSeam, pattern]);
+  }, [shownSeam, hoverEdge, pattern]);
   // The same edges on the garment in 3D, as long as the seam is pointed at (and the editor is there).
   useEffect(() => {
     onHighlight(highlighted);
@@ -682,8 +689,9 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
                   {piece.edges.map((e) => {
                     const c = colorOf(piece.id, e.id);
                     const hi = highlighted.has(`${piece.id}/${e.id}`);
-                    return c ? (
-                      <polyline key={e.id} data-edge={`${piece.id}/${e.id}`} points={e.pts.map(T).join(" ")} fill="none" stroke={c} strokeWidth={px(hi ? 6 : 2.5)} strokeLinecap="round" strokeOpacity={hoverSeam && !hi ? 0.35 : 1} />
+                    // A free edge (a hem, an opening) is only drawn over the outline when it is the one pointed at on the 3D garment.
+                    return c || hi ? (
+                      <polyline key={e.id} data-edge={`${piece.id}/${e.id}`} points={e.pts.map(T).join(" ")} fill="none" stroke={c ?? "#c0643e"} strokeWidth={px(hi ? 6 : 2.5)} strokeLinecap="round" strokeOpacity={highlighted.size && !hi ? 0.35 : 1} />
                     ) : null;
                   })}
                   {handles.map((h) =>
@@ -832,7 +840,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
             {checks.map((c) => (
               <li
                 key={c.id}
-                className="flex cursor-default items-baseline justify-between gap-2 rounded px-1 hover:bg-canvas"
+                className={`flex cursor-default items-baseline justify-between gap-2 rounded px-1 hover:bg-canvas ${shownSeam === c.id ? "bg-canvas" : ""}`}
                 onPointerEnter={() => setHoverSeam(c.id)}
                 onPointerLeave={() => setHoverSeam(null)}
               >

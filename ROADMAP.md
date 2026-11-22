@@ -344,7 +344,11 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   une bande au milieu d'un panneau vide).
   Une couture survolée dans la liste « Coutures » de l'éditeur 2D est aussi mise en évidence
   sur le vêtement en 3D (`PatternOverlay.setHighlight`) : ses bords redessinés deux fois plus
-  épais dans la couleur de la couture, les autres lignes du patron atténuées.
+  épais dans la couleur de la couture, les autres lignes du patron atténuées. Et dans l'autre
+  sens : le bord du patron sous la souris sur le vêtement (`PatternOverlay.pickEdge` : le plus
+  proche du pointeur à l'écran, à 9 pixels au plus, sauf si du tissu ou la peau le cache) allume
+  sa couture sur le patron 2D et sa ligne dans la liste ; un bord libre (ourlet, encolure) est
+  montré seul.
   Le panneau de gauche (« Atelier ») se replie comme l'assistant (flèche dans son en-tête, bouton
   « Atelier » sur la vue 3D pour le rouvrir ; ordinateur seulement, sur téléphone il est la page
   sous la vue) : la vue 3D prend la place, les réglages et l'onglet ouvert sont gardés.
