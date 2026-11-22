@@ -27,7 +27,7 @@ export interface Pose {
   /**
    * Lifts or lowers the body so that the soles of the feet carrying it stay at
    * rest height (walking in place): weight of each foot ("foot.L", "foot.R");
-   * null: no grounding.
+   * null: no grounding. Weights summing to less than 1 ground the body only that much (flight).
    */
   ground: Partial<Record<string, number>> | null;
   /** Translation of the whole body (m), e.g. the lateral weight shift of the walk; applied before grounding. */
@@ -173,7 +173,9 @@ export class Skeleton {
         lift += w * (this.soleHeight - lo);
         total += w;
       }
-      if (total > 0) for (let k = 0; k < this.count; k++) W[k * BONE_STRIDE + 7] += lift / total;
+      // Fades with the total weight below 1: as a runner's foot leaves or meets the floor the
+      // correction comes and goes smoothly, instead of the whole body jumping by what was left of it.
+      if (total > 0) for (let k = 0; k < this.count; k++) W[k * BONE_STRIDE + 7] += (lift / total) * Math.min(1, total);
     }
     for (let i = 0; i < W.length; i++) out[i] = W[i];
     return out;

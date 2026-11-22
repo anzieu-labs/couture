@@ -1,10 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { FEMALE, MALE } from "@/lib/avatar/morphology";
-import { CADENCE, DEFAULT_ARM_SPREAD } from "@/lib/avatar/motion";
+import { CADENCE, type Posture } from "@/lib/avatar/motion";
+import type { P2 } from "@/lib/pattern/curves";
+import { constrain, withDelta } from "@/lib/pattern/edit";
 import type { ExportOptions } from "@/lib/pattern/export";
 import { DEFAULT_ALLOWANCES } from "@/lib/pattern/markings";
+import type { PatternEdits } from "@/lib/pattern/types";
 import { TEXTILES, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
 import type { FitMode } from "@/lib/viewer/fitMap";
@@ -17,6 +20,7 @@ import { MorphologyPanel } from "./MorphologyPanel";
 import { PatternEditor } from "./PatternEditor";
 import { PatternPanel } from "./PatternPanel";
 import { PosePanel } from "./PosePanel";
+import { edgeColorer } from "./seamColors";
 import { TextilePanel } from "./TextilePanel";
 
 type Tab = "morpho" | "pose" | "patron" | "tissu";
@@ -55,11 +59,17 @@ export default function Studio() {
   const [autoRotate, setAutoRotate] = useState(false);
   const [walking, setWalking] = useState(false);
   const [cadence, setCadence] = useState(CADENCE.default);
-  const [armSpread, setArmSpread] = useState<number | null>(DEFAULT_ARM_SPREAD);
+  const [posture, setPosture] = useState<Posture>("standing");
   const [fitMode, setFitMode] = useState<FitMode | null>(null);
   const [cutting, setCutting] = useState<ExportOptions>({ allowances: DEFAULT_ALLOWANCES, fold: true });
+  // The 2D pattern editor belongs to the pattern tab: opened on entering it, closed on leaving it
+  // (it may be closed while there — on a phone it covers the 3D view).
   const [editorOpen, setEditorOpen] = useState(false);
   const closeEditor = useCallback(() => setEditorOpen(false), []);
+  const selectTab = (id: Tab) => {
+    setTab(id);
+    setEditorOpen(id === "patron");
+  };
 
   // Fabric
   const [textileId, setTextileId] = useState(TEXTILES[0].id);
@@ -94,27 +104,47 @@ export default function Studio() {
   }, [ready, cadence, viewerRef]);
 
   useEffect(() => {
-    if (ready) viewerRef.current?.setArmSpread(armSpread);
-  }, [ready, armSpread, viewerRef]);
+    if (ready) viewerRef.current?.setPosture(posture);
+  }, [ready, posture, viewerRef]);
 
-  // Wrist handles: shown in the Pose tab only; which arms are placed by hand.
-  const [handsPlaced, setHandsPlaced] = useState(false);
+  // 2D editor open: the pattern is drawn on the garment too (its edges in the seams' colours,
+  // its points), and a point can be dragged on either side — `live` holds the drag under way.
+  const [live, setLive] = useState<PatternEdits | null>(null);
+  const [focus3d, setFocus3d] = useState<string | null>(null);
+  const overlay = editorOpen && !!garment.measures;
+  const { pattern: drafted, edits } = garment;
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!ready || !viewer) return;
-    viewer.onHandsChange = (placed) => setHandsPlaced(placed.L || placed.R);
+    viewer.setPatternOverlay(overlay && drafted ? edgeColorer(drafted) : null);
+  }, [ready, overlay, drafted, viewerRef]);
+  // The points as the editor draws them (the drag under way included).
+  const shown = useMemo(
+    () => (overlay && garment.measures ? garment.garment.draft(garment.measures, garment.params, live ?? edits) : null),
+    [overlay, garment.garment, garment.measures, garment.params, live, edits],
+  );
+  useEffect(() => {
+    if (ready && shown) viewerRef.current?.setPatternHandles(shown.handles);
+  }, [ready, shown, viewerRef]);
+  /** A point dragged on the garment: `move` is its displacement on the pattern since it was taken (cm). */
+  const onPatternEdit = useEffectEvent((key: string, move: P2, done: boolean) => {
+    const start = edits[key] ?? [0, 0];
+    const next = constrain([start[0] + move[0], start[1] + move[1]], drafted?.handles.find((h) => h.key === key)?.axis ?? "free");
+    if (!done) return setLive(withDelta(edits, key, next));
+    setLive(null);
+    if (next[0] !== start[0] || next[1] !== start[1]) garment.commit(withDelta(edits, key, next));
+  });
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!ready || !viewer) return;
+    viewer.onPatternEdit = (key, move, done) => onPatternEdit(key, move, done);
+    viewer.onPatternFocus = setFocus3d;
     return () => {
-      viewer.onHandsChange = undefined;
+      viewer.onPatternEdit = viewer.onPatternFocus = undefined;
     };
   }, [ready, viewerRef]);
-  useEffect(() => {
-    if (ready) viewerRef.current?.setHandlesVisible(tab === "pose");
-  }, [ready, tab, viewerRef]);
+  const focusOnGarment = useCallback((key: string | null) => viewerRef.current?.setPatternFocus(key), [viewerRef]);
 
-  const turn = () => {
-    setWalking(false);
-    viewerRef.current?.turn();
-  };
 
   const goTo = (v: ViewPreset) => {
     setView(v);
@@ -134,6 +164,10 @@ export default function Studio() {
               measures={garment.measures}
               params={garment.params}
               edits={garment.edits}
+              live={live}
+              onLive={setLive}
+              focusKey={focus3d}
+              onFocus={focusOnGarment}
               onCommit={garment.commit}
               onUndo={garment.undo}
               onRedo={garment.redo}
@@ -246,7 +280,7 @@ export default function Studio() {
                 role="tab"
                 type="button"
                 aria-selected={tab === id}
-                onClick={() => setTab(id)}
+                onClick={() => selectTab(id)}
                 className="-mb-px border-b-2 border-transparent pb-2.5 text-sm font-medium text-muted transition-colors hover:text-ink aria-selected:border-ink aria-selected:text-ink"
               >
                 {label}
@@ -271,20 +305,18 @@ export default function Studio() {
           )}
           {tab === "pose" && (
             <PosePanel
-              armSpread={armSpread}
-              // eslint-disable-next-line react-hooks/refs -- depends on the morphology, re-read on each render
-              restArmSpread={viewerRef.current?.restArmSpread ?? 40}
-              onArmSpread={(v) => {
-                viewerRef.current?.releaseHands();
-                setArmSpread(v);
-              }}
               cadence={cadence}
               onCadence={setCadence}
               walking={walking}
-              onWalking={setWalking}
-              onTurn={turn}
-              handsPlaced={handsPlaced}
-              onReleaseHands={() => viewerRef.current?.releaseHands()}
+              onWalking={(on) => {
+                setWalking(on);
+                if (on) setPosture("standing");
+              }}
+              posture={posture}
+              onPosture={(p) => {
+                setPosture(p);
+                if (p !== "standing") setWalking(false);
+              }}
             />
           )}
           {tab === "patron" && (

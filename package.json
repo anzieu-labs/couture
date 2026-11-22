@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "bench": "node --experimental-transform-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tools/sim-bench/register.mjs tools/sim-bench/run.ts",
+    "bench:physics": "node --experimental-transform-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tools/sim-bench/register.mjs tools/sim-bench/physics.ts"
   },
   "dependencies": {
     "@kninnug/constrainautor": "^4.1.0",

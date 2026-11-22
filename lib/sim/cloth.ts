@@ -1,6 +1,8 @@
-import type { BodySdf } from "./bodySdf";
-import { substepState, type ClothModel } from "./model";
-import { applyAffine, applyInverse, blendAt, POSE_TOLERANCE } from "./posedBody";
+import { BONE_STRIDE } from "../avatar/skeleton";
+import { LIMB_STRIDE, type BodySdf } from "./bodySdf";
+import { GRAB, selfInterval, solveGrab, type GrabPatch } from "./grab";
+import { assembling, PLINTH, substepState, sweepPlan, type ClothModel, type Sweep } from "./model";
+import { applyAffine, applyInverse, blendAt, IMPACT_MARGIN, IMPACT_SPEED, POSE_TOLERANCE } from "./posedBody";
 import { SelfCollider, UNTANGLE_INTERVAL } from "./selfCollision";
 import { findTangles } from "./untangle";
 
@@ -9,6 +11,7 @@ import { findTangles } from "./untangle";
  * returns false when the body is in its rest pose.
  */
 export type PoseAt = (time: number, out: Float32Array) => boolean;
+
 
 /**
  * Reference CPU implementation of the XPBD solver ("small steps": many
@@ -27,30 +30,62 @@ export class CpuClothSolver {
   private readonly restPos: Float32Array;
   private readonly blend = new Float64Array(12);
   private readonly blend0 = new Float64Array(12);
+  /** Scratch: a limb's bone transform, and the blended transform of the deepest limb contact. */
+  private readonly limbBone = new Float64Array(12);
+  private readonly limbBlend = new Float64Array(12);
+  /** Scratch: centre of each limb's sphere as posed (3 per limb). */
+  private readonly limbCentre: Float64Array;
   private readonly q = new Float64Array(3);
   private readonly q0 = new Float64Array(3);
   /** Current bone transforms (when posed). */
   readonly bones: Float32Array | null;
   private readonly self: SelfCollider | null;
   private untangledAt = -Infinity;
+  private readonly sweeps: { assembling: Sweep[][]; draping: Sweep[][] };
+  /** The cloth held by hand (grab.ts): the patch, and where the hand goes during the next step. */
+  private grab: { patch: GrabPatch; from: [number, number, number]; to: [number, number, number] } | null = null;
+  /** Simulated time until which the cloth let go is still falling back. */
+  private heldUntil = -Infinity;
 
-  constructor(private readonly m: ClothModel, initial: Float32Array, private readonly sdf: BodySdf, boneCount = 0) {
-    this.pos = Float32Array.from(initial);
-    this.prev = Float32Array.from(initial);
+  /**
+   * `initial`: positions around the body's rest pose (the collision space); `start`: where
+   * the cloth starts, around the body as posed at time 0 (default: the same).
+   */
+  constructor(private readonly m: ClothModel, initial: Float32Array, private readonly sdf: BodySdf, boneCount = 0, start: Float32Array = initial) {
+    this.pos = Float32Array.from(start);
+    this.prev = Float32Array.from(start);
     this.restPos = Float32Array.from(initial);
     this.bones = sdf.skin && boneCount ? new Float32Array(12 * boneCount) : null;
-    this.self = m.self ? new SelfCollider(m.self, m.triangles, initial) : null;
+    this.limbCentre = new Float64Array((3 * sdf.limbs.length) / LIMB_STRIDE);
+    this.self = m.self ? new SelfCollider(m.self, m.triangles, start) : null;
     this.vel = new Float32Array(initial.length);
     this.edgeLambda = new Float32Array(m.edgeRest.length);
     this.bendLambda = new Float32Array(m.bendCompliance.length * 3);
+    this.sweeps = {
+      assembling: [sweepPlan(m.params, 0, true), sweepPlan(m.params, 1, true)],
+      draping: [sweepPlan(m.params, 0, false), sweepPlan(m.params, 1, false)],
+    };
+  }
+
+  /** Takes hold of the cloth by `patch` (grab.ts), the hand at `target`; null lets go. */
+  setGrab(patch: GrabPatch | null, target: readonly [number, number, number] = [0, 0, 0]) {
+    if (this.grab && !patch) this.heldUntil = this.time + GRAB.settle;
+    this.grab = patch && { patch, from: [...target], to: [...target] };
+  }
+
+  /** Moves the hand: it gets there during the next step. */
+  moveGrab(target: readonly [number, number, number]) {
+    if (this.grab) this.grab.to = [...target];
   }
 
   /** Advances `dt` seconds; `poseAt` animates the body (bone transforms at each substep). */
   step(dt: number, poseAt?: PoseAt) {
-    const { m, pos, prev, vel } = this;
+    const { m, pos, prev, vel, grab } = this;
     const p = m.params, invMass = m.invMass;
     const h = dt / p.substeps;
     const damp = Math.exp(-p.damping * h);
+    const plans = assembling(p, this.time) ? this.sweeps.assembling : this.sweeps.draping;
+    const selfEvery = selfInterval(p, !!grab || this.time < this.heldUntil);
     for (let s = 0; s < p.substeps; s++) {
       const { gravity, sewK, sewing, selfActive } = substepState(p, this.time);
       const posed = !!(poseAt && this.bones && poseAt(this.time + h, this.bones));
@@ -62,25 +97,32 @@ export class CpuClothSolver {
           pos[3 * i + a] += vel[3 * i + a] * damp * h;
         }
       }
+      if (grab) {
+        // An external force: applied to the predicted positions, the hand moving evenly over the step.
+        const k = (s + 1) / p.substeps, { from, to } = grab;
+        solveGrab(pos, grab.patch, from[0] + (to[0] - from[0]) * k, from[1] + (to[1] - from[1]) * k, from[2] + (to[2] - from[2]) * k, h);
+      }
       this.edgeLambda.fill(0);
       this.bendLambda.fill(0);
-      // Symmetric Gauss-Seidel: forward then backward sweep.
-      for (const reverse of [false, true]) {
+      // Symmetric Gauss-Seidel: sweeps alternately forward and backward (see sweepPlan).
+      for (const { reverse, bending } of plans[s & 1]) {
         this.solveStretch(h, reverse);
-        this.solveBending(h, reverse);
+        if (bending) this.solveBending(h, reverse);
         this.solveSeams(sewK, reverse);
       }
-      if (this.self && (s + 1) % m.self!.interval === 0) {
+      this.solveBands();
+      if (this.self && (s + 1) % selfEvery === 0) {
         if (selfActive && this.time - this.untangledAt >= UNTANGLE_INTERVAL) {
           this.untangledAt = this.time;
           findTangles(pos, m.triangles, m.self!, this.self.tangle);
         }
         this.self.solve(pos, invMass, selfActive);
       }
-      this.solveContacts(sewing, posed);
+      this.solveContacts(sewing, posed, h);
       for (let i = 0; i < pos.length; i++) vel[i] = (pos[i] - prev[i]) / h;
       this.time += h;
     }
+    if (grab) grab.from = grab.to;
   }
 
   private solveStretch(h: number, reverse: boolean) {
@@ -132,6 +174,40 @@ export class CpuClothSolver {
     }
   }
 
+  /** Bands (model.ts BandModel): a band longer than its rest length is scaled down about its centre of mass. */
+  private solveBands() {
+    const { pos } = this;
+    const { invMass } = this.m;
+    const { ranges, rest, segments, vertices } = this.m.bands;
+    for (let b = 0; b < rest.length; b++) {
+      const seg0 = 2 * ranges[4 * b], segEnd = seg0 + 2 * ranges[4 * b + 1], v0 = ranges[4 * b + 2], vEnd = v0 + ranges[4 * b + 3];
+      let length = 0;
+      for (let k = seg0; k < segEnd; k += 2) {
+        const a = 3 * segments[k], c = 3 * segments[k + 1];
+        const dx = pos[a] - pos[c], dy = pos[a + 1] - pos[c + 1], dz = pos[a + 2] - pos[c + 2];
+        length += Math.sqrt(dx * dx + dy * dy + dz * dz);
+      }
+      if (length <= rest[b]) continue; // a band does not push: the fabric may gather along it
+      let cx = 0, cy = 0, cz = 0, mass = 0;
+      for (let k = v0; k < vEnd; k++) {
+        const v = vertices[k], w = invMass[v];
+        if (!w) continue;
+        cx += pos[3 * v] / w; cy += pos[3 * v + 1] / w; cz += pos[3 * v + 2] / w;
+        mass += 1 / w;
+      }
+      if (!mass) continue;
+      cx /= mass; cy /= mass; cz /= mass;
+      const scale = rest[b] / length;
+      for (let k = v0; k < vEnd; k++) {
+        const v = vertices[k];
+        if (!invMass[v]) continue;
+        pos[3 * v] = cx + (pos[3 * v] - cx) * scale;
+        pos[3 * v + 1] = cy + (pos[3 * v + 1] - cy) * scale;
+        pos[3 * v + 2] = cz + (pos[3 * v + 2] - cz) * scale;
+      }
+    }
+  }
+
   private solveSeams(sewK: number, reverse: boolean) {
     const { pos } = this;
     const { invMass, seams, seamStart } = this.m;
@@ -154,12 +230,19 @@ export class CpuClothSolver {
   /**
    * Body contacts, in rest space when the body is posed (lib/sim/posedBody.ts):
    * restPos holds the rest-space position of `prev`, so friction acts on the
-   * motion relative to the skin.
+   * motion relative to the skin. Then the floor (model.ts PLINTH).
    */
-  private solveContacts(sewing: boolean, posed: boolean) {
-    const { pos, restPos: r, sdf, grad, blend: M, blend0: M0, q, q0 } = this;
+  private solveContacts(sewing: boolean, posed: boolean, h: number) {
+    const { pos, prev, restPos: r, sdf, grad, blend: M, blend0: M0, q, q0 } = this;
     const { params: p, onSeam } = this.m;
-    const offset = p.skinGap + p.thickness / 2;
+    const base = p.skinGap + p.thickness / 2;
+    // Centres of the limbs' spheres as posed (the limb's bone is rigid): a cheap first test.
+    const L = sdf.limbs, LC = this.limbCentre;
+    if (posed)
+      for (let l = 0; l < L.length; l += LIMB_STRIDE) {
+        const o = L[l + 4] * BONE_STRIDE, b = this.bones!;
+        for (let a = 0; a < 3; a++) LC[(3 * l) / LIMB_STRIDE + a] = b[o + 4 * a] * L[l] + b[o + 4 * a + 1] * L[l + 1] + b[o + 4 * a + 2] * L[l + 2] + b[o + 4 * a + 3];
+      }
     for (let i = 0; i < pos.length; i += 3) {
       let consistent = true;
       if (posed) {
@@ -178,8 +261,68 @@ export class CpuClothSolver {
       }
       let qx = q[0], qy = q[1], qz = q[2];
       // Seam vertices may cross the body while the seams are being closed.
-      const d = !consistent || (sewing && onSeam[i / 3]) ? Infinity : sdf.sample(qx, qy, qz);
+      const free = sewing && onSeam[i / 3];
+      const d = !consistent || free ? Infinity : sdf.sample(qx, qy, qz);
+      // Impact: cloth moving fast relative to the skin of a limb (posedBody.ts) — 0: none, 1: full.
+      // The skin offset then grows with that speed.
+      const rel = Math.sqrt((qx - r[i]) ** 2 + (qy - r[i + 1]) ** 2 + (qz - r[i + 2]) ** 2);
+      let impact = 0;
+      if (posed && rel > IMPACT_SPEED.from * h) {
+        for (let l = 0; l < L.length; l += LIMB_STRIDE) {
+          const dx = qx - L[l], dy = qy - L[l + 1], dz = qz - L[l + 2];
+          if (dx * dx + dy * dy + dz * dz > L[l + 3] * L[l + 3]) continue;
+          const k = Math.min(1, (rel / h - IMPACT_SPEED.from) / (IMPACT_SPEED.to - IMPACT_SPEED.from));
+          impact = k * k * (3 - 2 * k);
+          break;
+        }
+      }
+      const offset = base + impact * Math.min(IMPACT_MARGIN.max, (IMPACT_MARGIN.time / h) * rel);
+      if (posed && !free && d >= offset) {
+        // No contact where the vertex comes from: a limb swung far from its rest place may still
+        // be going through it (posedBody.ts). The deepest one pushes it out.
+        const B = this.limbBone, ML = this.limbBlend;
+        let deepest = offset, hx = 0, hy = 0, hz = 0;
+        for (let l = 0; l < L.length; l += LIMB_STRIDE) {
+          const c = (3 * l) / LIMB_STRIDE;
+          const rx = pos[i] - LC[c], ry = pos[i + 1] - LC[c + 1], rz = pos[i + 2] - LC[c + 2];
+          if (rx * rx + ry * ry + rz * rz > L[l + 3] * L[l + 3]) continue;
+          const o = L[l + 4] * BONE_STRIDE;
+          for (let e = 0; e < BONE_STRIDE; e++) B[e] = this.bones![o + e];
+          applyInverse(B, pos[i], pos[i + 1], pos[i + 2], q0);
+          const dl = sdf.sample(q0[0], q0[1], q0[2]);
+          if (dl >= deepest) continue;
+          blendAt(sdf, this.bones!, q0[0], q0[1], q0[2], M);
+          const ex = M[0] * q0[0] + M[1] * q0[1] + M[2] * q0[2] + M[3] - pos[i];
+          const ey = M[4] * q0[0] + M[5] * q0[1] + M[6] * q0[2] + M[7] - pos[i + 1];
+          const ez = M[8] * q0[0] + M[9] * q0[1] + M[10] * q0[2] + M[11] - pos[i + 2];
+          if (ex * ex + ey * ey + ez * ez >= POSE_TOLERANCE * POSE_TOLERANCE) continue;
+          deepest = dl;
+          hx = q0[0]; hy = q0[1]; hz = q0[2];
+          ML.set(M);
+        }
+        if (deepest < offset) {
+          sdf.gradient(hx, hy, hz, grad);
+          const push = offset - deepest;
+          // From now on the vertex is followed on the limb (its rest-space position there).
+          qx = hx + grad[0] * push; qy = hy + grad[1] * push; qz = hz + grad[2] * push;
+          applyAffine(ML, qx, qy, qz, pos, i);
+        }
+      }
       if (d < offset) {
+        // Where the vertex entered the body, on its way from where it was against the skin
+        // (rest space: the path is the motion of the cloth relative to the skin).
+        const ux = qx - r[i], uy = qy - r[i + 1], uz = qz - r[i + 2];
+        let stick = 0, ex = 0, ey = 0, ez = 0;
+        if (impact > 0 && sdf.sample(r[i], r[i + 1], r[i + 2]) >= offset) {
+          let lo = 0, hi = 1;
+          for (let it = 0; it < 5; it++) {
+            const mid = (lo + hi) / 2;
+            if (sdf.sample(r[i] + ux * mid, r[i + 1] + uy * mid, r[i + 2] + uz * mid) >= offset) lo = mid;
+            else hi = mid;
+          }
+          ex = r[i] + ux * lo; ey = r[i + 1] + uy * lo; ez = r[i + 2] + uz * lo;
+          stick = impact;
+        }
         sdf.gradient(qx, qy, qz, grad);
         const push = offset - d;
         qx += grad[0] * push; qy += grad[1] * push; qz += grad[2] * push;
@@ -192,12 +335,50 @@ export class CpuClothSolver {
         const limit = p.friction * push;
         const k = lt <= limit ? 1 : limit / lt;
         qx -= tx * k; qy -= ty * k; qz -= tz * k;
+        // Hit at speed (a runner's forearm against a cape): the vertex stays where it was hit
+        // instead of sliding round the limb (posedBody.ts).
+        if (stick > 0) {
+          qx += (ex - qx) * stick; qy += (ey - qy) * stick; qz += (ez - qz) * stick;
+        }
         if (posed) applyAffine(M, qx, qy, qz, pos, i);
         else {
           pos[i] = qx; pos[i + 1] = qy; pos[i + 2] = qz;
         }
       }
       r[i] = qx; r[i + 1] = qy; r[i + 2] = qz;
+      // The floor (world space: it does not move with the body): the plinth, a cylinder standing
+      // on the ground (model.ts PLINTH). A vertex inside it leaves by the nearest face — its top or
+      // its side: pushed up whatever the depth, cloth hanging over the edge would be thrown back
+      // onto the plinth and never settle. Same Coulomb friction, against the motion since the
+      // start of the substep.
+      const half = p.thickness / 2;
+      const x = pos[i], z = pos[i + 2];
+      const up = p.floorY + half - pos[i + 1];
+      const rad = Math.sqrt(x * x + z * z);
+      const out = PLINTH.radius + half - rad;
+      let nx = 0, ny = 0, nz = 0, depth = 0;
+      if (up > 0 && out > 0) {
+        if (up <= out || rad < 1e-6) {
+          ny = 1; depth = up;
+        } else {
+          nx = x / rad; nz = z / rad; depth = out;
+        }
+      } else {
+        const ground = p.floorY - PLINTH.height + half - pos[i + 1];
+        if (ground > 0) {
+          ny = 1; depth = ground;
+        }
+      }
+      if (depth > 0) {
+        pos[i] += nx * depth; pos[i + 1] += ny * depth; pos[i + 2] += nz * depth;
+        const mx = pos[i] - prev[i], my = pos[i + 1] - prev[i + 1], mz = pos[i + 2] - prev[i + 2];
+        const mn = mx * nx + my * ny + mz * nz;
+        const tx = mx - mn * nx, ty = my - mn * ny, tz = mz - mn * nz;
+        const lt = Math.sqrt(tx * tx + ty * ty + tz * tz);
+        const limit = p.friction * depth;
+        const k = lt <= limit ? 1 : limit / lt;
+        pos[i] -= tx * k; pos[i + 1] -= ty * k; pos[i + 2] -= tz * k;
+      }
     }
   }
 }

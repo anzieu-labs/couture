@@ -87,6 +87,17 @@ export interface Seam {
 }
 
 /**
+ * A band sewn along edges that keeps their total length — a waistband: the fabric may
+ * gather along it, but the garment cannot open up there (a skirt's waist does not stretch
+ * over the hips). Simulated as one constraint on the summed length of the edges.
+ */
+export interface Band {
+  edges: { piece: PieceId; edge: string }[];
+  /** Elasticity: how far the band may stretch beyond the edges' length (0.1: 10 %; 0: rigid). */
+  stretch: number;
+}
+
+/**
  * Pattern edits: displacement (cm) of named draft points, keyed `group.point`.
  * Relative to the drafted position, so edits survive a change of morphology.
  */
@@ -121,6 +132,8 @@ export interface Pattern {
   name: string;
   pieces: Piece[];
   seams: Seam[];
+  /** Edges held to their length by a band (waistband). */
+  bands?: Band[];
   /** Editable points (all pieces). */
   handles: Handle[];
   /** Key dimensions, for display (cm). */

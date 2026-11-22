@@ -212,7 +212,8 @@ export class HandHandles {
   private onMove(e: PointerEvent) {
     const d = this.drag;
     if (!d) {
-      this.setHover(this.pickAt(e));
+      // Hidden, the gizmos leave the cursor alone (ClothGrab sets it over the cloth).
+      if (this.group.visible) this.setHover(this.pickAt(e));
       return;
     }
     if (e.pointerId !== d.pointer) return;

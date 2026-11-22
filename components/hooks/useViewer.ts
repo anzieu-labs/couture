@@ -22,6 +22,8 @@ export function useViewer(container: RefObject<HTMLDivElement | null>) {
         if (cancelled) return v.dispose();
         viewer = v;
         viewerRef.current = v;
+        // Development only: a handle for measuring the GPU simulation from the console (tools/sim-bench/README.md).
+        if (process.env.NODE_ENV !== "production") (window as unknown as { __couture?: GarmentViewer }).__couture = v;
         // Called every frame: keep whole percents only, or the whole studio re-renders at 60 Hz.
         v.onSimProgress = (p) => setSimProgress(Math.floor(p * 100) / 100);
         v.onSimBackend = setSimBackend;

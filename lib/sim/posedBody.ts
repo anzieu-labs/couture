@@ -23,11 +23,48 @@ import type { BodySdf } from "./bodySdf";
  * differ by more than POSE_TOLERANCE, the vertex is in free space and gets no
  * contact.
  *
- * Same formulas as the contacts kernel of the GPU solver (lib/sim/gpu/shaders.ts).
+ * Limbs: the iteration above follows a cloth vertex continuously from where it was, so it
+ * only ever finds the body part the vertex already lies against. Cloth hanging in front of
+ * the torso maps back to a rest-space point in front of the torso — where the rest pose has
+ * nothing — even while a forearm, raised and swung by a run, goes right through it. A vertex
+ * with no contact is therefore also brought back by the rigid transform of each far-swinging
+ * limb (SdfGrid.limbs: forearms, hands, lower legs, feet): q = Bₖ⁻¹·p, kept if it falls in
+ * the limb's bounding sphere, under the skin offset, and in skin that the limb's bone does
+ * drive (blend at q ≈ Bₖ, same tolerance). The deepest such contact pushes the vertex out;
+ * no friction there (the reference position belongs to the other preimage).
+ *
+ * Impacts (on the limbs above only, where the cloth meets fast-moving skin): contacts are
+ * tested at the vertices only, and a vertex is pushed out along the
+ * field's gradient — away from the limb's axis. A forearm arriving fast thus pushes the
+ * vertices on either side of it apart, like a wedge, faster than the stretch constraints
+ * pull them back: the triangle opens to two or three times its size and ends up threaded on
+ * the arm, every vertex duly at the skin offset. Real cloth is carried by what hits it. So a
+ * vertex entering the body faster than IMPACT_SPEED (relative to the skin) is put back where
+ * its path from its previous rest-space position crossed the offset surface — it sticks where
+ * it was hit, and moves with the limb — instead of sliding round it. Below, Coulomb friction
+ * as usual. And the offset itself grows with that relative speed (IMPACT_MARGIN: the distance
+ * covered in a few milliseconds), so that the cloth starts moving before a fast hand reaches it —
+ * a fingertip is a finer wedge than the mesh — with no gap left once it moves with the skin.
+ * Measured on a cape, running: forearms through the cloth 85–91 % of the time with neither,
+ * hands still through with either alone (or with half the sticking), nothing through with
+ * both. The price: a limb that carries the cloth throws it about — a cape with no clasp
+ * comes off a runner's shoulders, and folds over itself more than self-collisions untangle.
+ *
+ * Same formulas as the contact kernels of the GPU solver (lib/sim/gpu/shaders.ts).
  */
 
 /** Largest |M₁·q₀ − p| (m) for which the rest-space preimage is trusted. */
 export const POSE_TOLERANCE = 0.005;
+/**
+ * Speed of the cloth relative to the skin (m/s) from which a vertex entering the body sticks
+ * where it entered, and above which it sticks fully.
+ */
+export const IMPACT_SPEED = { from: 1.5, to: 3 };
+/**
+ * Contact margin added to the skin offset for cloth moving relative to the skin: the distance
+ * covered in `time` seconds (whatever the substep), up to `max` (m).
+ */
+export const IMPACT_MARGIN = { time: 0.005, max: 0.025 };
 
 // Per-bone weight accumulators (the 8 × 4 grid influences involve a few distinct bones).
 const boneWeight = new Float64Array(256);

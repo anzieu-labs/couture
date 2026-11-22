@@ -16,9 +16,11 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   coque épaisse calculée sur le GPU, sans relecture) ou CPU en repli (worker).
 - **Tissus** : 10 textiles procéduraux avec propriétés physiques (grammage, rigidité en flexion,
   élasticité chaîne/trame, épaisseur, frottement).
-- **Pose et mouvement** : squelette d'Anny réduit à 27 articulations (skinning LBS), écartement des
-  bras réglable, marche sur place (vitesse réglable) et tour complet ; le tissu suit (collision en
-  espace repos).
+- **Pose et mouvement** : squelette d'Anny réduit à 27 articulations (skinning LBS), bras le long du
+  corps, marche et course sur place (cadence réglable), postures assise et accroupie ; le tissu suit
+  (collision en espace repos).
+- **Manipulation** : le tissu se saisit à la souris et se tire, dans tous les onglets ; éditeur 2D
+  ouvert, les points du patron se déplacent aussi sur le vêtement en 3D.
 
 ## 1. Rendre l'outil utile à quelqu'un qui coud
 
@@ -51,8 +53,10 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
 
 ## 2. Cœur de l'outil de conception
 
-- [x] **Éditeur de patron 2D interactif** (`components/PatternEditor.tsx`, bouton « Éditer le patron
-  en 2D » de l'onglet Patron ; à gauche de la 3D sur grand écran, par-dessus sur mobile) :
+- [x] **Éditeur de patron 2D interactif** (`components/PatternEditor.tsx` ; s'ouvre avec l'onglet
+  Patron et se ferme quand on le quitte — il n'existe que dans cet onglet, où le bouton « Éditer le
+  patron en 2D » permet de le fermer et de le rouvrir ; à gauche de la 3D sur grand écran,
+  par-dessus sur mobile) :
   - le tracé reste paramétrique : une modification est le **déplacement d'un point nommé** par
     rapport à sa position tracée (`PatternEdits`, `lib/pattern/tshirt.ts`), elle survit donc à un
     changement de morphologie ou de coupe. Points d'ancrage (encolure-épaule, milieu d'encolure, point
@@ -74,6 +78,32 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   maillage inchangé pour le tracé d'origine). Essai : 300 jeux de modifications aléatoires, 0 échec de
   maillage ou de marges sur les contours valides.
   *À faire* : édition libre de la manche (devant ≠ dos), ajout / suppression de points, pinces.
+- [x] **Patron dessiné sur le vêtement, points déplaçables en 3D** (2026-11, `lib/viewer/PatternOverlay.ts`),
+  seulement quand l'éditeur 2D est ouvert :
+  - chaque bord de pièce est tracé sur le vêtement simulé, dans la couleur de sa couture (celles
+    de l'éditeur, `components/seamColors.ts`) ; les bords non cousus (ourlets, ouvertures) à l'encre.
+    Le maillage garde pour cela ses sommets le long de chaque bord du patron (`GarmentMesh.edges`).
+    Lignes épaisses (`LineSegments2`), décollées de 1 mm de chaque face du tissu : visibles de
+    l'extérieur comme de l'intérieur, cachées par le corps et les autres épaisseurs ;
+  - les points de l'éditeur (ancrages et poignées de courbe) sont posés là où ils se trouvent sur le
+    tissu : la position sur le patron est lue dans le triangle du maillage qui la contient, par sa
+    transformation plat → drapé (les poignées, hors de la pièce, sont prolongées dans le plan du
+    tissu à leur ancrage) ;
+  - **tirer un point en 3D modifie le même point du patron** : le déplacement du pointeur, pris
+    dans le plan du tissu à cet endroit, est relu en coordonnées du patron (base tangente du
+    triangle) — le point reste sous le curseur, 2 cm le long du tissu font 2 cm sur le patron,
+    avec les mêmes contraintes d'axe et le même pas de 1 mm qu'en 2D (`lib/pattern/edit.ts`). Vu
+    presque par la tranche (moins de 20°), le point est tiré dans le plan face à la caméra ;
+  - les deux vues partagent la modification en cours : tirer un point en 2D déplace le point en 3D,
+    et inversement ; le point survolé d'un côté est surligné de l'autre. Au relâcher : même
+    historique (annuler / rétablir) et recouture ;
+  - un point l'emporte sur le tissu qu'il recouvre ; ailleurs le tissu se saisit comme d'habitude.
+  Vérifié dans le navigateur (GPU) : milieu bas du t-shirt tiré de 20 px → point déplacé de 20 px
+  à l'écran, Δ −7,8 cm, longueur 72,9 → 80,7 cm après recouture ; point d'épaule tiré en 2D de
+  +8,8 / +4,4 cm → 10 cm en 3D ; cape (25 points) et jupe (22 points).
+  *Limites* : les lignes restent celles du vêtement cousu jusqu'à la recouture ; en mode GPU les
+  positions sont relues à chaque image (une à deux images de retard pendant la couture) ; les
+  poignées de courbe éloignées (ourlet de la cape : 70 cm) flottent loin du vêtement.
 - [ ] **Variantes du t‑shirt** : col V, manches longues, oversize / cintré.
 - [ ] **Finitions des bords libres** (choix par bord, au design) : ourlet replié, bord-côte cousu, biais,
   parementure. Aujourd'hui tous les bords sont francs. Un premier essai d'ourlet automatique sur tous les bords
@@ -109,9 +139,10 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   vêtement n'est pas retournée (heuristique de Baraff : la petite région est la fautive) ; pour
   plusieurs vêtements, il faudra ordonner les couches (côté imposé entre vêtements).
 - [x] **Animation du mannequin** (onglet « Pose » + boutons Marche / Tour) : par défaut, une fois le
-  vêtement cousu, bras le long du corps (20°, `DEFAULT_ARM_SPREAD`) et coudes relâchés (jusqu'à 35°
+  vêtement cousu, bras le long du corps (20°, `ARM_SPREAD`) et coudes relâchés (jusqu'à 35°
   d'extension quand les bras descendent : la pose de repos a les coudes pliés de 44°, avant-bras vers
-  l'avant) ; bouton « Repos » pour la pose de couture (bras en A). Le réglage « Proportions » d'Anny
+  l'avant) ; bouton « Repos » pour la pose de couture (bras en A) — *remplacé depuis : bras à 20° dès
+  la couture, sans réglage ni bouton « Repos », voir « bras le long du corps dès le départ » plus bas*. Le réglage « Proportions » d'Anny
   n'est plus proposé (fixé à 0,5). **Mains placées à la souris** (onglet Pose : repère de translation
   à trois axes sur chaque poignet, `lib/viewer/HandHandles.ts` — flèche = déplacement contraint à
   l'axe, centre = libre face à la caméra ; axe vu de face masqué et non saisissable ; taille constante
@@ -143,6 +174,62 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   *Limites* : marche sur place (le pied d'appui glisse comme sur un tapis), écartement des bras
   limité à 20° (en dessous, le skinning écrase le dessus de l'épaule et pince la manche), solveur
   CPU ~3× plus lent quand le corps bouge (la marche passe au ralenti si le processeur ne suit pas).
+- [x] **Marche, course et postures** (2026-11, `lib/avatar/motion.ts`) :
+  - marche resserrée : les chevilles viennent à 5,5 cm du plan médian (12–13 cm entre elles au lieu
+    de 28 ; la pose de repos a les pieds écartés de 41 cm), l'adduction étant calculée sur la
+    longueur de jambe de la morphologie ; pied en oscillation continu en vitesse (il part et arrive
+    à la vitesse qu'il a au sol : cubique d'Hermite) ; jambe qui ralentit en arrivant en extension
+    (`SOFT_REACH`). Saut de vitesse le plus fort d'un point de peau : 0,5 m/s (1,45 avant) ;
+  - **course** au-delà d'un seuil de cadence (`RUN_CADENCE` : marche jusqu'à 135 pas/min, course à
+    partir de 155, fondu entre les deux ; curseur jusqu'à 180) : appui raccourci (38 % du cycle, donc
+    phase de vol), foulée plus longue sur genoux fléchis, pied levé haut derrière, bassin au plus bas
+    en milieu d'appui et remontant en vol (3 cm), buste penché, coudes fléchis. En vol aucun pied ne
+    porte le corps : l'ancrage au sol du squelette s'estompe avec le poids total des pieds
+    (`Skeleton.pose`), et les pieds sont posés sur les mêmes points de semelle que cet ancrage —
+    sinon tout le corps sautait de 1,5 mm à chaque pose de pied ;
+  - **postures** « Assise » et « Accroupie » (onglet Pose) : chevilles placées depuis les hanches
+    par la même cinématique inverse, pieds à plat au sol, transition de 1,4 s ; s'asseoir arrête la
+    marche, marcher relève le mannequin. Le siège n'est pas représenté ;
+  - bouton « Tour complet » retiré de l'interface (`GarmentViewer.turn` existe toujours) ;
+  - **bras le long du corps dès le départ** (`ARM_SPREAD` = 20°, plus de réglage d'écartement) : le
+    vêtement est cousu dans cette pose, on ne voit plus les bras partir de la pose en A puis
+    descendre. Les pièces placées le long des bras (manches) le sont deux fois, autour du bras de
+    repos (espace de collision, `PreparedGarment.initial`) et autour du bras posé (départ de la
+    simulation, `start`) ; les autres ne bougent pas. Mesuré aux réglages GPU sur le solveur de
+    référence : t-shirt jersey 0 croisement, étirement moyen 0,79 %. *Limite* : l'aisselle plus
+    serrée laisse des croisements sur le t-shirt en jersey — ~30 en repli CPU (maillage 1,5 cm ;
+    0 en pose en A), 16 mesurés sur le GPU réel ;
+  - onglet Pose réduit à un bloc « Posture » : Debout, Marche (ou Course), Assise, Accroupie ; la
+    cadence n'apparaît qu'en marche. Sections « Bras » et « Mains » retirées (la cinématique
+    inverse des bras et les repères de poignet restent dans le code, sans interface).
+  *Limites mesurées (repli CPU)* : en course le t-shirt tient (étirement 0,7 %) mais se croise
+  (≈ 95 croisements, pénétration jusqu'à 15 mm) ; accroupi ou assis, les cuisses rejoignent le buste et
+  la collision en espace repos ne sait plus de quel côté pousser : 500–900 croisements, pénétrations
+  de 3–5 cm. Les postures sont donc justes pour le corps, approximatives pour le vêtement.
+- [x] **Bras et mains qui traversaient la cape en courant** (2026-11, `lib/sim/posedBody.ts`,
+  mesure `limbs through` du banc) : en marche rien ne traversait ; en course (170 pas/min) les
+  avant-bras étaient à travers le tissu 85–91 % du temps. Trois causes, trois mesures :
+  - *membre invisible* : la collision en espace repos suit chaque sommet depuis sa position
+    précédente ; le tissu qui pend devant le buste ne « voit » pas l'avant-bras qui arrive. Un sommet
+    sans contact est donc aussi testé contre les extrémités qui s'éloignent beaucoup de leur place de
+    repos (avant-bras, mains, jambes, pieds : `SdfGrid.limbs`, transformation rigide de leur os), et
+    suivi sur ce membre ensuite ;
+  - *effet de coin* : les contacts ne portent que sur les sommets, repoussés à l'écart de l'axe du
+    membre ; un avant-bras rapide écartait les sommets plus vite que l'étirement ne les retenait, et le
+    triangle finissait enfilé sur le bras (arêtes à 2–3 × leur longueur, sommets pourtant bien à 5 mm
+    de la peau). Au-delà de 1,5 m/s de vitesse relative sur une extrémité, le sommet reste donc où il
+    a été touché (point d'entrée de sa trajectoire, cherché par dichotomie) au lieu de glisser autour ;
+  - *doigts plus fins que le maillage* : la marge de contact grandit avec la vitesse relative (distance
+    parcourue en 5 ms, 2,5 cm au plus) : le tissu part avant que la main n'arrive, sans écart au repos.
+  Résultat : plus aucun membre à travers sur le solveur de référence (repli CPU et réglages GPU) ;
+  sur le GPU, avant-bras 0 % (100 % avant), mains 21 % par une mesure approchée. Marche inchangée.
+  *Contrepartie* : un membre qui emporte le tissu le secoue ; la cape, sans attache, quitte les
+  épaules du coureur, et se replie sur elle-même plus vite que l'auto-collision ne la démêle
+  (croisements × 5 en course, repli CPU).
+  Essai retiré : tester aussi le milieu des arêtes — sur un corps convexe il est toujours un peu
+  sous la marge des sommets, la passe repoussait donc sans frottement tout le tissu posé (cape qui
+  glisse au sol même en marche) ; limitée au voisinage de la peau, elle n'empêchait plus rien.
+  *À faire* : une attache de cape (comme la ceinture de la jupe).
 - [x] **Cape qui marche à 1–8 i/s** (diagnostic 2026-11) : deux causes. (1) Rythme « temps réel » sans
   garde-fou : une image simulée un peu au-dessus du budget (~14 ms GPU pour la cape + le rendu)
   faisait rattraper jusqu'à 6 images d'un coup, puis saturer la file GPU (gel ~0,7 s). Désormais au
@@ -165,10 +252,71 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
     Tang et al. I3D 2018) ; culling par cônes de normales pour les zones sans auto-contact possible ;
   - auto-collision tous les 3 sous-pas pour les grands vêtements (−25 % mesuré, à valider en croisements) ;
   - tissu pincé entre deux parties du corps : « collision flypapering » (Baraff, Witkin, Kass 2003).
+- [x] **Sol** (2026-11) : un vêtement qui tombait traversait le socle (aucune collision : la
+  simulation s'arrêtait simplement au bout de sa durée). Le socle est maintenant un cylindre posé
+  sur le sol (`PLINTH`, `ClothParams.floorY`), traité avec les contacts dans les deux solveurs, en
+  espace monde, avec le même frottement de Coulomb : un sommet entré dans le socle ressort par la
+  face la plus proche (dessus ou côté — poussé vers le haut quelle que soit la profondeur, le tissu
+  pendant au bord était renvoyé sur le socle et ne se posait jamais). Mesuré : carré de tissu lâché
+  à cheval sur le bord (`npm run bench:physics`) et jupe sans ceinture sur le GPU : le point le
+  plus bas reste à une demi-épaisseur du sol, puis repos.
+  *Limite* : le champ de distance du corps ne descend que 25 cm sous le vêtement (2 m pour la
+  cape) : un vêtement qui tombe plus bas ne rencontre plus les jambes ni les pieds, seulement le sol.
+- [x] **Tissu tenu à la main** (2026-11, `lib/sim/grab.ts`, `lib/viewer/ClothGrab.ts`) : cliquer sur le
+  vêtement et tirer, dans tous les onglets ; ailleurs le même geste fait tourner la caméra.
+  - *La prise* : un ressort (300 N/m) entre la main et le centre de masse d'un disque de tissu de
+    4 cm de rayon autour du point saisi (distance mesurée le long du tissu, à travers les coutures
+    mais pas à travers l'air : l'autre épaisseur d'une manche n'est pas prise). Sa force est
+    répartie sur le disque en accélération uniforme, estompée vers le bord : le disque ne garde ni
+    forme ni orientation, il pend et se plie comme le tissu autour. Appliquée aux positions prédites,
+    avant les balayages — ce qu'est une force extérieure pour XPBD —, ressort implicite (stable quel
+    que soit le sous-pas), mêmes formules dans les deux solveurs (`solveGrab`, `grabWGSL` : une
+    invocation) ; la main est interpolée sur les sous-pas ;
+  - *Force plafonnée* : la main n'accélère jamais le point tenu de plus de 1 800 m/s² (0,3 à 0,6 N
+    sur du jersey, soit le poids de 0,2 à 0,4 m² ; davantage sur un tissu lourd, 2,5 N au plus). Un
+    vêtement qui ne peut pas suivre n'est pas étiré sans limite : la prise glisse ;
+  - *Auto-collision* : pendant la prise et 1,5 s après, une passe à chaque sous-pas sur le GPU au
+    lieu d'une sur deux (`selfIntervalHeld`) : la main accélère le tissu plus vite que des passes
+    espacées ne le rattrapent (ourlet soulevé de 27 cm : 30 à 45 croisements laissés, puis 0) ;
+  - *Viewer* : le point saisi est trouvé par lancer de rayon sur les positions connues côté
+    interface (mode CPU : celles du worker ; mode GPU : relues toutes les 120 ms tant que le tissu
+    bouge), sauf si le corps est devant ; la main se déplace dans le plan face à la caméra ; la
+    simulation, arrêtée au repos, est réveillée et tourne en temps réel pendant la prise et 1,5 s
+    après (le tissu retombe à vitesse réelle), puis retrouve le repos ;
+  - *Mesures* (`npm run bench -- --grab`, t-shirt jersey aux réglages du GPU sur le solveur de
+    référence) : ourlet soulevé de 27 cm, le point tenu suit sur 21 cm ; replié de 36 cm jusqu'à la
+    poitrine, sur 24 cm ; tiré de 50 cm vers le bas, le vêtement retient (1,6 cm). Dans les trois
+    cas 0 croisement pendant et après, allongement p99 9 % pendant la prise (6,6 % au repos), point
+    tenu revenu à 1 cm de son départ. Sur le GPU réel (16 croisements au repos sur ce t-shirt) : ourlet
+    soulevé de 29 cm, suivi au millimètre, 20 croisements après, retour à 1 mm ; tiré de 40 cm vers le
+    bas ou de 30 cm de côté à la poitrine, le vêtement retient (4 à 6 cm de déplacement), 20
+    croisements après, retour à 1 cm ; allongement p99 pendant la prise 9 % (6,5 % au repos).
+  *Limites* : replier fortement le tissu sur lui-même contre le corps (ourlet remonté de 36 cm
+  jusqu'à la poitrine) laisse, une fois sur deux sur le GPU, une centaine de croisements — la même
+  faiblesse de l'auto-collision que dans les poses assises ; « Recoudre » repart de zéro. Le repli
+  CPU a la même force mais suit moins bien (maillage grossier, 10 sous-pas). On ne tire que dans le
+  plan de l'écran : tourner la caméra pour tirer dans une autre direction. Pas encore d'épingle
+  (tenir un point pendant qu'on en tire un autre).
 - [ ] Arrêt de la simulation au repos réellement efficace (mesure du mouvement plus fréquente).
 - [ ] Rigidité réelle des tissés : l'étirement résiduel décroît en h² (10 sous-pas : 7,5 %,
-  20 : 2,7 %, 40 : 1 % en haut du devant, denim). Pistes : plus d'itérations d'étirement,
-  multigrille, ou forces de contrainte (λ) pour la carte de tension.
+  20 : 2,7 %, 40 : 1 % en haut du devant, denim). Cause mesurée (`npm run bench:physics`) : une
+  charge portée le long de N arêtes n'est corrigée que d'environ 1/N² par balayage de Gauss-Seidel
+  (bande de denim de 60 cm suspendue : 1,49 % d'allongement au lieu de 0,05 % ; idem pour la tension
+  d'un anneau posé sur les hanches). **Fait (2026-11)** : 4 balayages d'étirement et de coutures +
+  1 de flexion par sous-pas au lieu de 2 + 2 (`sweepPlan`, CPU et GPU), à coût égal (GPU : 9,45 ms
+  par image contre 9,8) : bande suspendue 0,75 %, t-shirt jersey 0,72 % d'étirement moyen au lieu de
+  1,81 % sur le GPU (p99 7,2 % au lieu de 16,5 %), flexion à peine plus souple (porte-à-faux de
+  12 cm : +1,5 %). L'ancien plan 2 + 2 est gardé jusqu'au démarrage de l'auto-collision : plus
+  raide, le tissu ne se dégageait plus des croisements de la couture.
+  *Reste* : l'étirement se concentre là où le vêtement porte sur le corps (épaules : 10–20 %
+  localement), la raideur effective d'une arête étant bornée par m / h² par balayage.
+  Essais non retenus : réappliquer les multiplicateurs du sous-pas précédent (« warm start ») —
+  instable au-delà de la moitié avec un seul passage, gain 2 au mieux ; correction multigrille par
+  agrégats rigides (les arêtes entre deux plaques résolues ensemble, plaques déplacées en bloc) —
+  bande suspendue à 0,12 %, jupe tenue sans ceinture en denim, mais stable sur un tissu fluide
+  seulement à demi-gain (sinon le tissu « bout » : plus la flexion est faible, plus c'est instable),
+  quelques croisements en marche, et tension seule ou déplacements lissés font pire. À reprendre avec
+  un prolongement cohérent avec les multiplicateurs.
 
 ## 4. Autres vêtements
 
@@ -201,17 +349,46 @@ en place 3D par type dans `lib/garment/place.ts`.
   plafonner la vitesse ou le déplacement d'un contact (pire), chercher plusieurs antécédents au repos
   (main et cuisse vues ensemble ; pas d'effet mesurable).
   *Limite* : 50 pages A4 pour la longueur par défaut (le SVG sur traceur est plus adapté).
+  **Panneaux éditables en 2D** (2026-11) : dos et devants étaient des arcs de cercle purs, seule la
+  capuche avait des points. Ils sont tracés par des points nommés et des courbes de Bézier
+  (`PointSet` « cape » : milieu bas et milieu d'encolure du dos, bas et encolure à l'épaule, bas et
+  encolure au milieu devant, poignées des courbes du bas et de l'encolure ; quart de cercle par une
+  cubique : 0,4 mm d'écart sur le bas). Les deux points de la ligne d'épaule appartiennent au dos et
+  au devant à la fois : une modification déplace les deux, la couture d'épaule reste appariée ;
+  l'encolure de la capuche se recale sur l'encolure modifiée. L'éditeur cadre désormais les trois
+  pièces (la capuche est à un zoom près).
 - [x] **Jupe trapèze** (`lib/pattern/skirt.ts`) : devant et dos (au pli), sans pinces (galbe pris
   dans la couture de côté, de la hanche à la taille), évasement réglable, bas d'équerre avec le côté.
   Placement rang par rang : chaque ligne horizontale du patron enroulée sur une ellipse autour de la
   section du corps à cette hauteur (jambes réunies sous l'entrejambe), de périmètre égal à sa largeur.
-  *Bug ouvert* : la jupe tient à la taille au repos mais glisse et tombe dès qu'on lance la marche
-  (constaté 2026-11, avec ou sans le correctif de l'analyse des croisements ; cause non étudiée).
+  **Jupe qui tombait** (corrigé 2026-11, mesuré avec `tools/sim-bench`) : deux causes.
+  (1) Au premier sous-pas de la marche, le corps descendait de 11,7 mm et les genoux avançaient de
+  48 mm d'un coup (vitesse équivalente : 58 m/s) : le fléchissement du genou et la hauteur du pied
+  s'appliquaient en entier au lieu de suivre le fondu de la marche ; à chaque pas, le genou
+  « claquait » aussi de quelques mm en se verrouillant en extension (pente infinie de l'angle du
+  genou à jambe tendue). Corrigé dans `lib/avatar/motion.ts` (fondu, extension limitée à celle de la
+  pose de repos) : plus aucun saut, le point de peau le plus rapide est le pied en oscillation (2 m/s).
+  (2) Rien ne retenait la taille sinon l'étirement du tissu, que le solveur sous-estime pour un
+  anneau (voir « Rigidité réelle des tissés ») : la taille s'ouvrait de 19 % et passait les hanches,
+  même au repos en jersey : sans ceinture, il est normal qu'elle tombe. D'où le réglage
+  **« Élasticité de la ceinture »** (onglet Patron, Coupe) : allongement maximal du tour de taille,
+  de 0 % (ceinture rigide, par défaut) à 40 % (« sans ceinture » : bord franc, comme avant).
+  `Pattern.bands` → contrainte `BandModel` (CPU et GPU) : la longueur du tour de taille ne dépasse
+  pas celle du patron × (1 + élasticité) ; un anneau trop long est contracté uniformément autour de
+  son barycentre (exact pour le périmètre, sans distorsion, quantité de mouvement et moment cinétique
+  conservés ; déplacer les sommets le long du gradient de la longueur déchirait le contour).
+  Mesures : en marche (9 s, repli CPU) descente de 2,5 cm (denim) et 4,2 cm (jersey), oscillation du
+  bassin comprise ; sur le GPU, ceinture rigide à la taille, 10 % : 11 cm plus bas, sur les hanches ;
+  sans ceinture : la jupe tombe. *À faire* : dessiner la ceinture sur le patron et dans les exports
+  (largeur, élastique plus court que la taille) ; image du sélecteur à recapturer.
 - [ ] Pantalon (entrejambe, jambes).
 
 ## 5. Socle technique
 
 - [ ] Tests automatisés des parties de calcul (mesures, tracé du patron, maillage, solveur CPU).
+  Premier pas : `tools/sim-bench` (`npm run bench`, `npm run bench:physics`, sonde GPU) mesure le
+  solveur — étirement, croisements, pénétration, glissement, temps — sur les vêtements de
+  l'application et contre des valeurs analytiques ; voir son README. Pas encore de seuils ni d'intégration continue.
 - [ ] Mise en ligne en site statique (Vercel ou serveur Coolify).
 - [ ] Sauvegarde / partage d'un modèle (morphologie + patron + tissu) par lien.
 
@@ -224,7 +401,9 @@ en place 3D par type dans `lib/garment/place.ts`.
 - Les solveurs CPU (`lib/sim/cloth.ts`) et GPU (`lib/sim/gpu/`) partagent `lib/sim/model.ts` :
   toute modification physique doit être faite dans les deux.
 - Pas de SMPL / SMPL‑X dans le dépôt (licences non commerciales).
-- Simulation : 20 sous-pas sur GPU, 10 en repli CPU. Placement initial sans étirement (ellipse
+- Simulation : 20 sous-pas sur GPU, 10 en repli CPU ; par sous-pas, 4 balayages étirement + coutures
+  et 1 de flexion (`sweepPlan`), puis ceintures, auto-collision, contacts (corps puis sol). Toute modification du
+  solveur se mesure avant / après avec `tools/sim-bench`. Placement initial sans étirement (ellipse
   dimensionnée sur le patron, longueurs conservées) et frottement de Coulomb proportionnel à la
   poussée de contact : sinon le tissu reste étiré artificiellement.
 - Essai abandonné : attaches longue portée (LRA) à sens unique vers les épaules — elles injectent

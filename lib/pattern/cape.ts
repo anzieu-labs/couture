@@ -1,5 +1,5 @@
 import { cubic, polylineLength, type P2 } from "./curves";
-import { mirror, mirrorEdges, NO_EDITS, PointSet, type BodyMeasures, type Edge, type Pattern, type PatternEdits, type Piece, type Seam, type SeamSide } from "./types";
+import { KAPPA, mirror, mirrorEdges, NO_EDITS, PointSet, type BodyMeasures, type Edge, type Pattern, type PatternEdits, type Piece, type Seam, type SeamSide } from "./types";
 
 /**
  * Magician's cape: a full circle open at the front, with a two-piece hood.
@@ -38,18 +38,6 @@ export const capeAutoLength = (m: BodyMeasures) => Math.round(m.hpsToFloor - 34)
 /** Front panel angle (rad): a quarter less half the gap left open at the centre front. */
 const FRONT = ((90 - 5) * Math.PI) / 180;
 
-/** Arc of radius r from angle a0 to a1 (rad), point (r sin φ, −r cos φ): φ = 0 straight down. */
-function arc(r: number, a0: number, a1: number): P2[] {
-  const n = Math.max(6, Math.ceil((Math.abs(a1 - a0) * r) / 1.5));
-  return Array.from({ length: n + 1 }, (_, i) => {
-    const a = a0 + ((a1 - a0) * i) / n;
-    return [r * Math.sin(a), -r * Math.cos(a)] as P2;
-  });
-}
-
-/** Front arc: angle ψ below the +x axis, point (r cos ψ, −r sin ψ). */
-const frontArc = (r: number, a0: number, a1: number): P2[] => arc(r, Math.PI / 2 - a0, Math.PI / 2 - a1);
-
 const renameSide = (edges: Edge[]): Edge[] => edges.map((e) => ({ ...e, id: e.id.replace(/\+$/, "-") }));
 
 export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: PatternEdits = NO_EDITS): Pattern {
@@ -59,11 +47,30 @@ export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: 
   const r2 = r1 + L;
   const rm = (r1 + r2) / 2;
 
+  // The panels are arcs of circles, drawn as cubic Béziers between named points so that they
+  // can be edited (a quarter circle by a cubic is off by 0.03 % of its radius: 0.4 mm on the
+  // hem). The points on the shoulder line belong to the back and to the front alike — one
+  // edit moves both, the shoulder seam keeps matching.
+  const bp = new PointSet("cape", "back", edits);
+  const fp = new PointSet("cape", "front+", edits);
+  const shoulder = (set: PointSet) => ({
+    SH: set.anchor("SH", "Bas · épaule", [r2, 0]),
+    SN: set.anchor("SN", "Encolure · épaule", [r1, 0]),
+  });
+
   // ---- Back: half annulus, symmetric about the centre back (x = 0).
+  const CH = bp.anchor("CH", "Milieu bas", [0, -r2], "vertical");
+  const CN = bp.anchor("CN", "Milieu encolure", [0, -r1], "vertical");
+  const B = shoulder(bp);
+  const bh1 = bp.control("bh1", "Courbe du bas", [KAPPA * r2, -r2], [0, -r2], CH, "horizontal");
+  const bh2 = bp.control("bh2", "Courbe du bas", [r2, -KAPPA * r2], [r2, 0], B.SH);
+  const bn1 = bp.control("bn1", "Courbe d'encolure", [r1, -KAPPA * r1], [r1, 0], B.SN);
+  const bn2 = bp.control("bn2", "Courbe d'encolure", [KAPPA * r1, -r1], [0, -r1], CN, "horizontal");
+  const backNeck = cubic(B.SN, bn1, bn2, CN, 24);
   const backPlus: Edge[] = [
-    { id: "hem+", pts: arc(r2, 0, Math.PI / 2), allowance: "hem" },
-    { id: "shoulder+", pts: [[r2, 0], [r1, 0]], allowance: "seam" },
-    { id: "neck+", pts: arc(r1, Math.PI / 2, 0), allowance: "seam" },
+    { id: "hem+", pts: cubic(CH, bh1, bh2, B.SH, 64), allowance: "hem" },
+    { id: "shoulder+", pts: [B.SH, B.SN], allowance: "seam" },
+    { id: "neck+", pts: backNeck, allowance: "seam" },
   ];
   // Grain line off the centre line when cut on the fold, where the panel is tall enough.
   const gx = 0.3 * r2;
@@ -82,11 +89,22 @@ export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: 
   };
 
   // ---- Fronts: quarter annulus less the centre-front gap; the left one (+x), and its mirror.
-  const cf0: P2 = [r1 * Math.cos(FRONT), -r1 * Math.sin(FRONT)], cf1: P2 = [r2 * Math.cos(FRONT), -r2 * Math.sin(FRONT)];
+  // Angle ψ below the +x axis: point (r cos ψ, −r sin ψ), from the shoulder (0) to the centre front.
+  const cs = Math.cos(FRONT), sn = Math.sin(FRONT);
+  const kf = (4 / 3) * Math.tan(FRONT / 4); // Bézier handle length of an arc of that angle
+  const cf0b: P2 = [r1 * cs, -r1 * sn], cf1b: P2 = [r2 * cs, -r2 * sn];
+  const F = shoulder(fp);
+  const cf0 = fp.anchor("FN", "Encolure · devant", cf0b);
+  const cf1 = fp.anchor("FH", "Bas · devant", cf1b);
+  const fh1 = fp.control("fh1", "Courbe du bas", [cf1b[0] + kf * r2 * sn, cf1b[1] + kf * r2 * cs], cf1b, cf1);
+  const fh2 = fp.control("fh2", "Courbe du bas", [r2, -kf * r2], [r2, 0], F.SH);
+  const fn1 = fp.control("fn1", "Courbe d'encolure", [r1, -kf * r1], [r1, 0], F.SN);
+  const fn2 = fp.control("fn2", "Courbe d'encolure", [cf0b[0] + kf * r1 * sn, cf0b[1] + kf * r1 * cs], cf0b, cf0);
+  const frontNeck = cubic(F.SN, fn1, fn2, cf0, 24);
   const frontEdges: Edge[] = [
-    { id: "hem", pts: frontArc(r2, FRONT, 0), allowance: "hem" },
-    { id: "shoulder", pts: [[r2, 0], [r1, 0]], allowance: "seam" },
-    { id: "neck", pts: frontArc(r1, 0, FRONT), allowance: "seam" },
+    { id: "hem", pts: cubic(cf1, fh1, fh2, F.SH, 64), allowance: "hem" },
+    { id: "shoulder", pts: [F.SH, F.SN], allowance: "seam" },
+    { id: "neck", pts: frontNeck, allowance: "seam" },
     { id: "cf", pts: [cf0, cf1], allowance: "hem" },
   ];
   const frontLabel: P2 = [rm * Math.cos(Math.PI / 4), -rm * Math.sin(Math.PI / 4)];
@@ -105,8 +123,9 @@ export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: 
     };
   };
 
-  // ---- Hood: neck edge = front arc + back arc of the neckline, split at the shoulder.
-  const nf = r1 * FRONT, nb = (r1 * Math.PI) / 2;
+  // ---- Hood: neck edge = front arc + back arc of the neckline (as drawn, edits included),
+  // split at the shoulder.
+  const nf = polylineLength(frontNeck), nb = polylineLength(backNeck);
   const H = b.headHeight + p.hoodHeight;
   const D = b.headDepth + p.hoodDepth;
   const hp = new PointSet("hood", "hood+", edits);
@@ -174,11 +193,11 @@ export function draftCape(b: BodyMeasures, p: CapeParams = DEFAULT_CAPE, edits: 
     name: "Cape à capuche",
     pieces,
     seams,
-    handles: hp.handles,
+    handles: [...bp.handles, ...fp.handles, ...hp.handles],
     dims: [
       { label: "Longueur", value: L },
-      { label: "Encolure", value: neckline },
-      { label: "Tour du bas", value: r2 * (Math.PI + 2 * FRONT) },
+      { label: "Encolure", value: 2 * (nf + nb) },
+      { label: "Tour du bas", value: 2 * (polylineLength(backPlus[0].pts) + polylineLength(frontEdges[0].pts)) },
       { label: "Hauteur capuche", value: Math.max(T[1], P[1]) },
       { label: "Profondeur capuche", value: Math.max(K[0], P[0]) },
       { label: "Couture capuche", value: polylineLength(backSeam) },

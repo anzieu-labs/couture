@@ -5,28 +5,32 @@ import type { AnnyModel, BodyShape, LocalChanges, Phenotype } from "../avatar/an
 import { measureForPattern, type TorsoFrame } from "../avatar/bodyMeasures";
 import { loadAnnyModel } from "../avatar/loadAnny";
 import { measureBody, type BodyMeasurement } from "../avatar/measure";
-import { Animator, CADENCE, MOTION_DELAY, SETTLE_TIME, type Side } from "../avatar/motion";
+import { Animator, CADENCE, MOTION_DELAY, SETTLE_TIME, type Posture, type Side } from "../avatar/motion";
 import { BONE_STRIDE, Skeleton, skinVertices, type Vec3 } from "../avatar/skeleton";
 import { GarmentSimulator } from "../garment/GarmentSimulator";
 import { MeshSlicer } from "../geometry/slice";
-import type { BodyMeasures, Pattern } from "../pattern/types";
-import { SELF_DELAY, type ClothParams } from "../sim/model";
+import type { P2 } from "../pattern/curves";
+import type { BodyMeasures, Handle, Pattern } from "../pattern/types";
+import { PLINTH, SELF_DELAY, type ClothParams } from "../sim/model";
 import { UNTANGLE_INTERVAL } from "../sim/selfCollision";
 import type { Textile } from "../textiles/catalog";
 import type { TextileColors } from "../textiles/generate";
 import { GpuClothSolver } from "../sim/gpu/GpuClothSolver";
 import type { GarmentGeometry } from "../garment/protocol";
 import type { SdfGrid } from "../sim/bodySdf";
+import { GRAB, selectGrab } from "../sim/grab";
 import type { ClothModel } from "../sim/model";
+import { ClothGrab, type PickMesh } from "./ClothGrab";
 import { ClothShell } from "./ClothShell";
 import type { FitMode } from "./fitMap";
 import { GpuClothShell } from "./GpuClothShell";
 import { HandHandles } from "./HandHandles";
 import { FabricMaterial } from "./FabricMaterial";
+import { PatternOverlay, type EdgeColor } from "./PatternOverlay";
 
 export type ViewPreset = "face" | "profil" | "dos" | "buste";
 
-const PLINTH_H = 0.04;
+const PLINTH_H = PLINTH.height;
 const VIEWS: Record<ViewPreset, { pos: [number, number, number]; target: [number, number, number] }> = {
   face: { pos: [0, 1.2, 4.5], target: [0, 0.94, 0] },
   profil: { pos: [4.5, 1.2, 0.2], target: [0, 0.94, 0] },
@@ -57,15 +61,24 @@ const SIM_DT = 1 / 60;
  */
 const MAX_IN_FLIGHT = 2;
 const MAX_CATCH_UP = 2;
+/** GPU mode: the cloth's positions are read back for picking this often while it moves (ms). */
+const PICK_REFRESH = 120;
 
 interface Garment {
   mesh: THREE.Mesh;
+  /** Mid-surface triangles and the latest positions known on this side (CPU mode: streamed; GPU mode: read back), for picking. */
+  triangles: Uint32Array;
+  positions: Float32Array | null;
+  /** Simulated time (CPU mode; GPU mode: the solver's), and from when the cloth may be held by hand. */
+  time: number;
+  grabFrom: number;
   /** CPU mode: shell rebuilt from streamed positions. */
   cpu?: ClothShell;
   /** GPU mode: simulated and rebuilt on the GPU every frame. */
   gpu?: {
     solver: GpuClothSolver;
     shell: GpuClothShell;
+    model: ClothModel;
     duration: number;
     sewTime: number;
     done: boolean;
@@ -75,6 +88,11 @@ interface Garment {
     movedAt: number;
     /** Simulated time of the last intersection analysis request. */
     untangledAt: number;
+    /** Simulated time until which the simulation stays in real time (the cloth let go falls back). */
+    liveUntil: number;
+    /** Picking: simulated time of `positions`, and when they were last asked for (ms). */
+    readTime: number;
+    readAt: number;
   };
   /** Switches the fit-map quantity and refreshes the colours. */
   setFitMode: (mode: FitMode) => void;
@@ -96,6 +114,11 @@ interface Tween {
  * renderer's GPU with WebGPU (simulation + thick shell, no read-back), else on
  * the CPU in a worker.
  *
+ * The cloth can be held with the pointer and pulled (ClothGrab, lib/sim/grab.ts):
+ * the simulation then runs in real time, as when the body moves. While the 2D
+ * pattern editor is open, the pattern is drawn on the garment and its points can
+ * be dragged there too (PatternOverlay).
+ *
  * The mannequin can walk in place or turn (Animator, skinned on the CPU). The
  * animation clock follows the simulated time while a GPU garment is simulated
  * (real time while the body moves, fast forward otherwise), the wall clock
@@ -110,6 +133,10 @@ export class GarmentViewer {
   onSimBackend?: (backend: "gpu" | "cpu") => void;
   /** Called when an arm is placed by hand or released (sides whose wrist has a target). */
   onHandsChange?: (placed: Record<Side, boolean>) => void;
+  /** A pattern point is dragged on the garment: its move so far on the pattern (cm); `done` when released. */
+  onPatternEdit?: (key: string, move: P2, done: boolean) => void;
+  /** The pattern point under the pointer or being dragged on the garment changed. */
+  onPatternFocus?: (key: string | null) => void;
 
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
@@ -117,6 +144,11 @@ export class GarmentViewer {
   private readonly resizeObserver: ResizeObserver;
   private readonly figure = new THREE.Group();
   private readonly handles: HandHandles;
+  private readonly grabber: ClothGrab;
+  private readonly overlay: PatternOverlay;
+  /** Pattern of the latest garment asked for: the one on screen once its mesh arrives. */
+  private dressing: Pattern | null = null;
+  private cursor = "";
   private readonly bodyGeo = new THREE.BufferGeometry();
   private readonly body: THREE.Mesh;
   private readonly fabric: FabricMaterial;
@@ -138,7 +170,7 @@ export class GarmentViewer {
   private gpuInFlight = 0;
   private walkWanted = false;
   private cadence = CADENCE.default;
-  private armSpread: number | null = null;
+  private posture: Posture = "standing";
   private posed = false;
   private readonly bones: Float32Array;
   /** CPU mode: pose of the latest simulated frame. */
@@ -202,12 +234,31 @@ export class GarmentViewer {
     this.setBody(anny.defaults());
     this.handles = new HandHandles(this.camera, renderer.domElement, this.figure, this.controls);
     this.handles.onDrag = (side, target) => this.setHandTarget(side, target);
+    const skin = () => ({ positions: this.bodyGeo.getAttribute("position").array, triangles: anny.indices });
+    // Before the cloth's hold: a pattern point wins over the cloth under it.
+    this.overlay = new PatternOverlay(this.camera, renderer.domElement, this.figure, this.controls, () => [this.pickable(), skin()]);
+    this.overlay.onEdit = (key, move, done) => this.onPatternEdit?.(key, move, done);
+    this.overlay.onFocus = (key) => this.onPatternFocus?.(key);
+    this.grabber = new ClothGrab(this.camera, renderer.domElement, this.figure, this.controls, () => this.pickable(), skin);
+    this.grabber.onStart = (triangle, point) => this.startGrab(triangle, point);
+    this.grabber.onMove = (target) => {
+      const g = this.garment;
+      if (g?.gpu) g.gpu.solver.moveGrab(target);
+      else if (g) this.simulator.grab({ target });
+    };
+    this.grabber.onEnd = () => {
+      const g = this.garment;
+      if (g?.gpu) {
+        g.gpu.solver.setGrab(null);
+        g.gpu.liveUntil = g.gpu.solver.time + GRAB.settle;
+      } else if (g) this.simulator.grab({ release: true });
+    };
 
     this.fabric = new FabricMaterial(renderer.getMaxAnisotropy());
     this.simulator = new GarmentSimulator({
       onMesh: (m) => this.showCpuGarment(m),
       onModel: (m) => this.startGpuGarment(m, m.model, m.sdf),
-      onFrame: (positions, progress, bones) => this.updateGarment(positions, progress, bones),
+      onFrame: (positions, time, progress, bones) => this.updateGarment(positions, time, progress, bones),
       onTangles: (tangle) => this.garment?.gpu?.solver.setTangles(tangle),
     });
 
@@ -243,7 +294,7 @@ export class GarmentViewer {
     this.skeleton = new Skeleton(labels, parents, shape.joints, shape.positions, this.anny.skin);
     if (this.animator) {
       this.animator.skeleton = this.skeleton;
-      this.animator.restoreArmSpread(this.clock);
+      this.animator.restore(this.clock);
     } else this.animator = new Animator(this.skeleton);
     this.posed = false;
   }
@@ -268,8 +319,17 @@ export class GarmentViewer {
   /** Walks in place (looped) or stops; with a garment, starts once it is sewn. */
   setWalking(on: boolean) {
     this.walkWanted = on;
+    if (on) this.posture = "standing"; // the mannequin stands up to walk
     this.animator.setWalking(on, this.clock);
     if (this.garment?.cpu) this.simulator.motion({ walk: on });
+  }
+
+  /** Standing, seated or squatting (eased); sitting or squatting stops the walk. With a garment, applied once it is sewn. */
+  setPosture(posture: Posture) {
+    this.posture = posture;
+    if (posture !== "standing") this.walkWanted = false;
+    this.animator.setPosture(posture, this.clock);
+    if (this.garment?.cpu) this.simulator.motion({ posture });
   }
 
   /** Walking cadence (steps per minute). */
@@ -277,13 +337,6 @@ export class GarmentViewer {
     this.cadence = stepsPerMinute;
     this.animator.setCadence(stepsPerMinute, this.clock);
     if (this.garment?.cpu) this.simulator.motion({ cadence: stepsPerMinute });
-  }
-
-  /** Arm spread in degrees from the body (null: rest pose); with a garment, applied once it is sewn. */
-  setArmSpread(degrees: number | null) {
-    this.armSpread = degrees;
-    this.animator.setArmSpread(degrees, this.clock);
-    if (this.garment?.cpu) this.simulator.motion({ arms: degrees });
   }
 
   /**
@@ -323,11 +376,6 @@ export class GarmentViewer {
     return out;
   }
 
-  /** Arm spread of the current morphology's rest pose (degrees from the body). */
-  get restArmSpread(): number {
-    return this.animator.restArmSpread;
-  }
-
   /** One full turn on the plinth (stops walking first). */
   turn() {
     this.walkWanted = false;
@@ -339,7 +387,7 @@ export class GarmentViewer {
   private restartMotion(params: Pick<ClothParams, "sewTime" | "settleTime">) {
     this.animator.reset();
     this.animator.holdUntil(this.clock + params.sewTime + params.settleTime + MOTION_DELAY);
-    this.animator.restoreArmSpread(this.clock);
+    this.animator.restore(this.clock);
     if (this.walkWanted) this.animator.setWalking(true, this.clock);
     this.cpuBones = null;
   }
@@ -368,6 +416,7 @@ export class GarmentViewer {
   /** Sews and drapes a pattern on the current mannequin (in a worker). */
   dress(pattern: Pattern, torso: TorsoFrame, cloth: Partial<ClothParams> = {}) {
     if (!this.shape) return;
+    this.dressing = pattern;
     // The new garment is placed on the rest pose: ease back to it meanwhile.
     this.animator.fadeToRest(this.clock);
     const { labels, parents } = this.anny.meta.bones;
@@ -383,13 +432,83 @@ export class GarmentViewer {
         skin: this.anny.skin,
         rig: { labels, parents },
       },
-      motion: { walking: this.walkWanted, cadence: this.cadence, arms: this.armSpread, hands: this.animator.handTargets },
+      motion: { walking: this.walkWanted, cadence: this.cadence, hands: this.animator.handTargets, posture: this.posture },
     });
     this.onSimProgress?.(0);
   }
 
   setFabric(textile: Textile, colors: TextileColors, scale = 1) {
     this.fabric.set(textile, colors, scale);
+  }
+
+  // --- The pattern on the garment ----------------------------------------------
+
+  /**
+   * Draws the pattern on the garment (2D editor open): its edges in the colours `colorOf`
+   * gives them, its points where they sit on the cloth, draggable (onPatternEdit). Null hides it.
+   */
+  setPatternOverlay(colorOf: EdgeColor | null) {
+    this.overlay.show(colorOf);
+    if (colorOf && this.garment?.positions) this.overlay.update(this.garment.positions);
+  }
+
+  /** The pattern's points as the 2D editor currently draws them (being edited or not). */
+  setPatternHandles(handles: Handle[]) {
+    this.overlay.setHandles(handles);
+  }
+
+  /** Highlights the point selected or hovered in the 2D editor. */
+  setPatternFocus(key: string | null) {
+    this.overlay.setFocus(key);
+  }
+
+  /** The new garment on screen, for the overlay. */
+  private overlayGarment(g: GarmentGeometry) {
+    if (this.dressing) this.overlay.setGarment({ pattern: this.dressing, rest: g.rest, triangles: g.triangles, piece: g.piece, pieceIds: g.pieceIds, outline: g.outline, thickness: g.thickness }, g.initial);
+  }
+
+  // --- Holding the cloth ------------------------------------------------------
+
+  /** The cloth as it can be picked: once sewn, where it was last seen from this side. */
+  private pickable(): PickMesh | null {
+    const g = this.garment;
+    if (!g?.positions || (g.gpu ? g.gpu.solver.time : g.time) < g.grabFrom) return null;
+    return { positions: g.positions, triangles: g.triangles };
+  }
+
+  /** The pointer takes hold of the cloth at `point`, on `triangle`; false if it cannot. */
+  private startGrab(triangle: number, point: Vec3): boolean {
+    const g = this.garment;
+    if (!g?.positions) return false;
+    if (g.gpu) {
+      const patch = selectGrab(g.gpu.model, g.positions, triangle, point);
+      if (!patch) return false;
+      g.gpu.solver.setGrab(patch, point);
+      g.gpu.done = false; // wakes the simulation up
+    } else this.simulator.grab({ start: { triangle, point } });
+    return true;
+  }
+
+  /**
+   * GPU mode: keeps the positions known on this side up to date (read back: a few frames late
+   * while the cloth moves) — for picking, and every frame for the pattern drawn on the garment.
+   */
+  private refreshPick(g: Garment, now: number) {
+    const gpu = g.gpu;
+    const drawn = this.overlay.visible;
+    if (!gpu || (this.grabber.holding && !drawn)) return;
+    const time = gpu.solver.time;
+    if (time === gpu.readTime || (!drawn && (time < g.grabFrom || now - gpu.readAt < PICK_REFRESH))) return;
+    const read = gpu.solver.readPositions();
+    if (!read) return;
+    gpu.readAt = now;
+    read
+      .then((p) => {
+        g.positions = p;
+        gpu.readTime = time;
+        if (this.garment === g) this.overlay.update(p);
+      })
+      .catch(() => {});
   }
 
   /** The renderer's WebGPU device (null with the WebGL 2 fallback). */
@@ -423,25 +542,33 @@ export class GarmentViewer {
     this.cpuBones = null;
     this.addGarment({
       mesh: new THREE.Mesh(shell.geometry, this.fabric.material),
+      triangles: g.triangles,
+      positions: g.initial,
+      time: 0,
+      grabFrom: g.grabFrom,
       cpu: shell,
       setFitMode: (mode) => shell.setFitMode(mode),
       dispose: () => shell.dispose(),
     });
+    this.overlayGarment(g);
     this.onSimBackend?.("cpu");
   }
 
-  private updateGarment(positions: Float32Array, progress: number, bones: Float32Array | null) {
+  private updateGarment(positions: Float32Array, time: number, progress: number, bones: Float32Array | null) {
     if (!this.garment?.cpu) return;
     this.garment.cpu.update(positions);
+    this.garment.positions = positions;
+    this.garment.time = time;
+    this.overlay.update(positions);
     this.cpuBones = bones;
     this.onSimProgress?.(progress);
   }
 
   /** GPU mode: simulation and shell run on the renderer's device, every frame. */
-  private startGpuGarment(g: GarmentGeometry, model: ClothModel, sdf: SdfGrid) {
+  private startGpuGarment(g: GarmentGeometry & { restPose: Float32Array }, model: ClothModel, sdf: SdfGrid) {
     const device = this.gpuDevice;
     if (!device) return;
-    const solver = new GpuClothSolver(device, model, g.initial, sdf, this.skeleton.count);
+    const solver = new GpuClothSolver(device, model, g.initial, sdf, this.skeleton.count, g.restPose);
     this.restartMotion(model.params);
     const shell = new GpuClothShell(this.renderer, g.rest, g.triangles, g.thickness, g.tensile, solver.positions);
     const rebuildShell = () => {
@@ -454,9 +581,14 @@ export class GarmentViewer {
     mesh.frustumCulled = false;
     this.addGarment({
       mesh,
+      triangles: g.triangles,
+      positions: null,
+      time: 0,
+      grabFrom: g.grabFrom,
       gpu: {
         solver,
         shell,
+        model,
         duration: model.params.duration,
         sewTime: model.params.sewTime,
         done: false,
@@ -464,6 +596,9 @@ export class GarmentViewer {
         lastMotion: -1,
         movedAt: -Infinity,
         untangledAt: -Infinity,
+        liveUntil: -Infinity,
+        readTime: -1,
+        readAt: -Infinity,
       },
       setFitMode: (mode) => {
         shell.setFitMode(mode);
@@ -474,22 +609,25 @@ export class GarmentViewer {
         shell.dispose();
       },
     });
+    this.overlayGarment(g);
     this.onSimBackend?.("gpu");
   }
 
   /**
    * One rendered frame of GPU simulation: real-time pacing while the body
-   * moves, else adaptive fast forward; rest detection. Advances the clock.
+   * moves or the cloth is held by hand, else adaptive fast forward; rest
+   * detection. Advances the clock.
    */
   private stepGpuGarment(gpu: NonNullable<Garment["gpu"]>, interval: number) {
     const { solver, shell } = gpu;
+    const holding = this.grabber.holding;
     let frames: number;
     if (this.gpuInFlight >= MAX_IN_FLIGHT) {
       // The GPU is behind: render only. The body's clock follows the simulation, so
       // the motion slows down rather than piling up work.
       frames = 0;
       this.lag = 0;
-    } else if (this.animator.moving(this.clock)) {
+    } else if (this.animator.moving(this.clock) || holding || solver.time < gpu.liveUntil) {
       this.lag = Math.min(MAX_LAG, this.lag + Math.max(0, interval) / 1000);
       frames = Math.min(MAX_CATCH_UP, Math.floor(this.lag / SIM_DT));
       this.lag = Math.min(this.lag - frames * SIM_DT, SIM_DT);
@@ -508,7 +646,7 @@ export class GarmentViewer {
       this.gpuDevice?.queue.onSubmittedWorkDone().then(() => this.gpuInFlight--);
       this.clock += frames * SIM_DT;
     }
-    if (this.animator.moving(this.clock)) {
+    if (this.animator.moving(this.clock) || holding) {
       gpu.movedAt = solver.time;
       gpu.still = 0;
     }
@@ -529,12 +667,15 @@ export class GarmentViewer {
     }
     gpu.done =
       !this.animator.pending(this.clock) &&
+      !holding &&
       (gpu.still >= REST.count || solver.time >= Math.max(gpu.duration, gpu.movedAt + SETTLE_TIME));
     this.onSimProgress?.(gpu.done ? 1 : Math.min(1, solver.time / gpu.duration));
   }
 
   private removeGarment() {
     if (!this.garment) return;
+    this.grabber.cancel();
+    this.overlay.setGarment(null);
     this.figure.remove(this.garment.mesh);
     this.garment.dispose();
     this.garment = null;
@@ -563,6 +704,12 @@ export class GarmentViewer {
     const gpu = garment?.gpu;
     if (gpu && (!gpu.done || this.animator.pending(this.clock))) this.stepGpuGarment(gpu, interval);
     else if (interval > 0) this.clock += Math.min(interval, 100) / 1000;
+    if (garment) this.refreshPick(garment, time);
+    this.grabber.update();
+    this.overlay.frame();
+    // A pattern point wins over the cloth under it.
+    const cursor = this.overlay.cursor ?? this.grabber.cursor ?? "";
+    if (cursor !== this.cursor) this.renderer.domElement.style.cursor = this.cursor = cursor;
     const bones = garment?.cpu ? this.cpuBones : this.animator.sample(this.clock, this.bones) ? this.bones : null;
     this.poseBody(bones);
     this.handles.update(this.wrists(bones));
@@ -618,7 +765,7 @@ export class GarmentViewer {
     );
     floor.receiveShadow = true;
     const plinth = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.42, 0.44, PLINTH_H, 96),
+      new THREE.CylinderGeometry(PLINTH.radius, PLINTH.radius + 0.02, PLINTH_H, 96),
       new THREE.MeshStandardMaterial({ color: "#d9d3c9", roughness: 0.7 }),
     );
     plinth.position.y = PLINTH_H / 2;
@@ -633,6 +780,8 @@ export class GarmentViewer {
     this.simulator.dispose();
     this.removeGarment();
     this.handles.dispose();
+    this.grabber.dispose();
+    this.overlay.dispose();
     this.fitMaterial.dispose();
     this.fabric.dispose();
     this.scene.traverse((o) => {

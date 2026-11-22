@@ -46,7 +46,30 @@ export interface ClothParams {
   damping: number;
   /** Substeps between two self-collision passes (0: off). */
   selfInterval: number;
+  /**
+   * The same while the cloth is held by hand and just after (lib/sim/grab.ts): the hand
+   * accelerates the cloth more than passes that far apart can catch.
+   */
+  selfIntervalHeld: number;
+  /**
+   * Gauss-Seidel sweeps per substep over the stretch constraints and the seams (alternately
+   * forward and backward), and how many of them also sweep the bending constraints.
+   */
+  stretchSweeps: number;
+  bendSweeps: number;
+  /** Height of the floor under the feet (m, body frame): the top of the plinth. −Infinity: no floor. */
+  floorY: number;
 }
+
+/**
+ * The plinth the mannequin stands on (a cylinder centred on the body's vertical axis): its top
+ * is the floor under the feet; around it the ground lies `height` lower. A garment that falls
+ * lands on them instead of going through (contacts of both solvers).
+ */
+export const PLINTH = { radius: 0.42, height: 0.04 };
+
+/** Height of the ground under the point (x, z) for a floor at `floorY` under the feet. */
+export const floorAt = (floorY: number, x: number, z: number) => (x * x + z * z > PLINTH.radius * PLINTH.radius ? floorY - PLINTH.height : floorY);
 
 export const DEFAULT_CLOTH: ClothParams = {
   density: 0.16,
@@ -62,6 +85,10 @@ export const DEFAULT_CLOTH: ClothParams = {
   duration: 5,
   damping: 1.5,
   selfInterval: 2,
+  selfIntervalHeld: 1,
+  stretchSweeps: 4,
+  bendSweeps: 1,
+  floorY: -Infinity,
 };
 
 /** Light load used to turn "elongation under light load" into a tensile modulus (N/m). */
@@ -100,6 +127,45 @@ export interface ClothModel {
   triangles: Uint32Array;
   /** Self-collisions (null: off). */
   self: SelfCollisionModel | null;
+  /** Bands: see BandModel. */
+  bands: BandModel;
+}
+
+/**
+ * Bands (pattern/types.ts Band): the summed length of a band's segments stays below its
+ * length on the pattern (plus its elasticity). A waistband resting on the hips is held by hoop tension, which edge by edge
+ * Gauss-Seidel builds up far too slowly (a ring of N edges passes on a fraction ~1/N² of a
+ * radial load per sweep): without the band a skirt's waist opens by 20 % and slides down.
+ *
+ * A band longer than its rest length is scaled down about its centre of mass: every
+ * segment shortens by the same ratio whatever the band's shape, and neither linear nor
+ * angular momentum changes. (Moving the vertices along the gradient of the length
+ * instead concentrates the correction on the kinks of the polyline, and tears it.)
+ */
+export interface BandModel {
+  /** Per band: first segment, segment count, first vertex, vertex count. */
+  ranges: Uint32Array;
+  /** Longest each band may get (m): its length on the pattern, plus its elasticity. */
+  rest: Float32Array;
+  /** Segments, as pairs of vertices. */
+  segments: Uint32Array;
+  /** Vertices of each band. */
+  vertices: Uint32Array;
+}
+
+function buildBands(mesh: GarmentMesh): BandModel {
+  const ranges: number[] = [], rest: number[] = [], segments: number[] = [], vertices: number[] = [];
+  for (const { segments: pairs, stretch } of mesh.bands ?? []) {
+    const own = [...new Set(pairs)];
+    ranges.push(segments.length / 2, pairs.length / 2, vertices.length, own.length);
+    let length = 0;
+    for (let i = 0; i < pairs.length; i += 2)
+      length += Math.hypot(mesh.rest[2 * pairs[i]] - mesh.rest[2 * pairs[i + 1]], mesh.rest[2 * pairs[i] + 1] - mesh.rest[2 * pairs[i + 1] + 1]);
+    segments.push(...pairs);
+    vertices.push(...own);
+    rest.push(length * (1 + stretch));
+  }
+  return { ranges: Uint32Array.from(ranges), rest: Float32Array.from(rest), segments: Uint32Array.from(segments), vertices: Uint32Array.from(vertices) };
 }
 
 /**
@@ -244,6 +310,7 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
     onSeam,
     triangles: tri,
     self,
+    bands: buildBands(mesh),
   };
 }
 
@@ -255,6 +322,9 @@ export function buildClothModel(mesh: GarmentMesh, initial: Float32Array, p: Clo
  */
 export const SELF_DELAY = 0.4;
 
+/** Whether the garment is still being put together at `time`: seams closing, then untangling (sweepPlan). */
+export const assembling = (p: ClothParams, time: number) => time <= p.sewTime + SELF_DELAY;
+
 /** Per-substep scalars (same formulas on CPU and GPU). */
 export function substepState(p: ClothParams, time: number) {
   return {
@@ -264,6 +334,33 @@ export function substepState(p: ClothParams, time: number) {
     sewK: Math.max(0, 1 - time / p.sewTime),
     sewing: time < p.sewTime,
   };
+}
+
+/** One Gauss-Seidel sweep of a substep: its direction, and whether it includes the bending constraints. */
+export interface Sweep {
+  reverse: boolean;
+  bending: boolean;
+}
+
+/**
+ * Sweeps of a substep (same on CPU and GPU). Stretch and seams are swept `stretchSweeps`
+ * times, alternately forward and backward; the first `bendSweeps` sweeps also solve the
+ * bending constraints. Odd substeps run the mirrored sequence, so that a single bending
+ * sweep per substep still alternates its direction.
+ *
+ * Stretch is what converges slowly (a load carried along N edges is corrected by ~1/N² per
+ * sweep) while bending, a soft constraint, is solved in one sweep: 4 + 1 sweeps cost what
+ * 2 + 2 did and halve the spurious elongation (hanging denim strip: 1.49 % → 0.75 %; the
+ * tip of a 12 cm cantilever comes down 1.5 % more).
+ *
+ * Until self-collisions start (`assembling`, see assembling(): decided once per frame),
+ * 2 + 2 sweeps: the pieces cross each other as they are sewn together, and the softer cloth
+ * of fewer stretch sweeps lets them slip apart again in time; with 4 sweeps some crossings
+ * were still there when self-collisions started, and stayed locked in for good.
+ */
+export function sweepPlan(p: ClothParams, substep: number, assembling: boolean): Sweep[] {
+  const stretch = assembling ? 2 : p.stretchSweeps, bend = assembling ? 2 : p.bendSweeps;
+  return Array.from({ length: stretch }, (_, i) => ({ reverse: (i + (bend % 2 ? substep : 0)) % 2 === 1, bending: i < bend }));
 }
 
 /** Stops the simulation once the cloth has come to rest after sewing. */

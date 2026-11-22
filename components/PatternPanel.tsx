@@ -238,7 +238,8 @@ export function PatternPanel({
       <Section title="Coupe">
         <div className="space-y-4">
           {garment.params.map((s) => {
-            const v = params[s.key];
+            const v = params[s.key] ?? garment.defaults[s.key];
+            const unit = s.unit ?? "cm";
             // Automatic settings (value 0): shown at the value worked out from the body.
             const auto = s.auto && v <= 0 ? (measures ? s.auto(measures) : null) : null;
             return (
@@ -249,7 +250,8 @@ export function PatternPanel({
                 max={s.max}
                 step={s.step}
                 value={auto ?? (v > 0 || !s.auto ? v : s.min)}
-                display={s.auto && v <= 0 ? `auto · ${auto?.toFixed(0) ?? "—"} cm` : `${v} cm`}
+                display={s.auto && v <= 0 ? `auto · ${auto?.toFixed(0) ?? "—"} ${unit}` : s.maxLabel && v >= s.max ? s.maxLabel : `${v} ${unit}`}
+                ends={s.ends}
                 onChange={(x) => onParams({ ...params, [s.key]: x })}
                 onDoubleClick={s.auto ? () => onParams({ ...params, [s.key]: 0 }) : undefined}
               />

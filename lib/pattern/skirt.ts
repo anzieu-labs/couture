@@ -20,9 +20,18 @@ export interface SkirtParams {
   hipEase: number;
   /** Extra width at the hem, each side of each panel (cm). */
   flare: number;
+  /**
+   * Elasticity of the waistband: how far it may stretch (%). 0: a rigid waistband, the skirt
+   * stays at the waist; the more elastic, the lower it sits on the hips. NO_WAISTBAND: a raw
+   * waist edge — only the stretch of the fabric holds the skirt, which slides off.
+   */
+  waistband: number;
 }
 
-export const DEFAULT_SKIRT: SkirtParams = { length: 0, waistEase: 2, hipEase: 4, flare: 9 };
+/** Top of the waistband elasticity setting (%): no waistband at all. */
+export const NO_WAISTBAND = 40;
+
+export const DEFAULT_SKIRT: SkirtParams = { length: 0, waistEase: 2, hipEase: 4, flare: 9, waistband: 0 };
 
 export const skirtAutoLength = (m: BodyMeasures) => Math.round(m.waistToKnee + 4);
 
@@ -106,6 +115,12 @@ export function draftSkirt(b: BodyMeasures, p: SkirtParams = DEFAULT_SKIRT, edit
     name: "Jupe trapèze",
     pieces,
     seams,
+    // Waistband: without it nothing but the stretch of the fabric keeps the waist from opening,
+    // and the skirt slides over the hips.
+    bands:
+      (p.waistband ?? 0) < NO_WAISTBAND
+        ? [{ edges: (["front", "back"] as const).flatMap((piece) => ["waist+", "waist-"].map((edge) => ({ piece, edge }))), stretch: (p.waistband ?? 0) / 100 }]
+        : [],
     handles: [...front.handles, ...back.handles],
     dims: [
       { label: "Tour de taille", value: waist },

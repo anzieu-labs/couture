@@ -1,4 +1,4 @@
-import type { DressRequest, MotionRequest, WorkerRequest, WorkerResponse } from "./protocol";
+import type { DressRequest, GrabRequest, MotionRequest, WorkerRequest, WorkerResponse } from "./protocol";
 
 export interface SimulatorEvents {
   /** A new garment mesh (flat rest coordinates double as UVs). */
@@ -6,8 +6,8 @@ export interface SimulatorEvents {
   onMesh: (mesh: Extract<WorkerResponse, { type: "mesh" }>) => void;
   /** GPU mode: a prepared cloth model to simulate on the renderer's device. */
   onModel: (model: Extract<WorkerResponse, { type: "model" }>) => void;
-  /** CPU mode: simulated positions, and the body pose they were simulated with (null: rest). */
-  onFrame: (positions: Float32Array, progress: number, bones: Float32Array | null) => void;
+  /** CPU mode: simulated positions at the simulated `time`, and the body pose they were simulated with (null: rest). */
+  onFrame: (positions: Float32Array, time: number, progress: number, bones: Float32Array | null) => void;
   /** GPU mode: tangled regions of the positions sent with `untangle`. */
   onTangles: (tangle: Float32Array) => void;
 }
@@ -27,7 +27,7 @@ export class GarmentSimulator {
       if (msg.type === "mesh" || msg.type === "model") this.shown = msg.id;
       if (msg.type === "mesh") this.events.onMesh(msg);
       else if (msg.type === "model") this.events.onModel(msg);
-      else if (msg.type === "frame") this.events.onFrame(msg.positions, msg.progress, msg.bones);
+      else if (msg.type === "frame") this.events.onFrame(msg.positions, msg.time, msg.progress, msg.bones);
       else if (msg.type === "tangles") this.events.onTangles(msg.tangle);
       else console.error("Garment simulation failed:", msg.message);
     };
@@ -41,6 +41,11 @@ export class GarmentSimulator {
   /** CPU mode: walk / turn request for the garment being simulated in the worker. */
   motion(req: Omit<MotionRequest, "type">) {
     this.worker.postMessage({ type: "motion", ...req } satisfies WorkerRequest);
+  }
+
+  /** CPU mode: the cloth held by hand, for the garment being simulated in the worker. */
+  grab(req: Omit<GrabRequest, "type">) {
+    this.worker.postMessage({ type: "grab", ...req } satisfies WorkerRequest);
   }
 
   /**

@@ -2,6 +2,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { P2 } from "@/lib/pattern/curves";
+import { constrain, SNAP, withDelta } from "@/lib/pattern/edit";
 import { cutPieces, type Allowances } from "@/lib/pattern/markings";
 import type { GarmentDef, GarmentParams } from "@/lib/pattern/garments";
 import { NO_EDITS, seamSideLength, type BodyMeasures, type Handle, type Pattern, type PatternEdits } from "@/lib/pattern/types";
@@ -13,6 +14,13 @@ interface Props {
   measures: BodyMeasures;
   params: GarmentParams;
   edits: PatternEdits;
+  /** Edits of a drag under way, here or on the garment in 3D (null: none), and how this editor reports its own. */
+  live: PatternEdits | null;
+  onLive: (edits: PatternEdits | null) => void;
+  /** Point hovered or dragged on the garment in 3D: shown as selected here. */
+  focusKey: string | null;
+  /** The point hovered, dragged or selected here changed: highlighted on the garment. */
+  onFocus: (key: string | null) => void;
   onCommit: (edits: PatternEdits) => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -23,7 +31,6 @@ interface Props {
 }
 
 const GAP = 8; // cm between pieces
-const SNAP = 0.1; // cm
 const ZOOM = { min: 2, max: 80 }; // px per cm
 
 
@@ -40,18 +47,6 @@ type Drag =
 
 const fmt = (v: number, digits = 1) => v.toLocaleString("fr-FR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const signed = (v: number) => `${v > 0.04 ? "+" : v < -0.04 ? "−" : "±"}${fmt(Math.abs(v))}`;
-
-function withDelta(edits: PatternEdits, key: string, d: P2): PatternEdits {
-  const next = { ...edits };
-  if (Math.hypot(d[0], d[1]) < 1e-6) delete next[key];
-  else next[key] = d;
-  return next;
-}
-
-function constrain(d: P2, axis: Handle["axis"]): P2 {
-  const r = (v: number) => Math.round(v / SNAP) * SNAP + 0; // + 0: no "-0"
-  return axis === "vertical" ? [0, r(d[1])] : axis === "horizontal" ? [r(d[0]), 0] : [r(d[0]), r(d[1])];
-}
 
 function bounds(pts: P2[]) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -81,10 +76,11 @@ function shownPieces(pattern: Pattern) {
 
 /**
  * Interactive 2D pattern editor: drag the draft's points and curve handles (on the right half).
+ * The same points can be dragged on the garment in 3D (lib/viewer/PatternOverlay.ts): the edits
+ * of a drag under way are shared (`live`), whichever side it happens on.
  * Memoised: the studio re-renders with the simulation progress, the editor need not.
  */
-export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, onCommit, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
-  const [live, setLive] = useState<PatternEdits | null>(null);
+export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onCommit, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
   const liveRef = useRef<PatternEdits | null>(null);
   const shown = live ?? edits;
   const pattern = useMemo(() => garment.draft(measures, params, shown), [garment, measures, params, shown]);
@@ -171,7 +167,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
 
   const setLiveEdits = (e: PatternEdits | null) => {
     liveRef.current = e;
-    setLive(e);
+    onLive(e);
   };
 
   const startHandleDrag = (e: React.PointerEvent, h: Handle, ox: number, oy: number) => {
@@ -269,7 +265,10 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   }, [hoverSeam, pattern]);
   const badPieces = new Set(issues.map((i) => i.piece));
   const editCount = Object.keys(edits).length;
-  const focus = pattern.handles.find((h) => h.key === (dragging && dragging !== "pan" ? dragging : (hovered ?? selected)));
+  const dragged = dragging && dragging !== "pan" ? dragging : null;
+  const focus = pattern.handles.find((h) => h.key === (dragged ?? focusKey ?? hovered ?? selected));
+  const own = dragged ?? hovered ?? selected;
+  useEffect(() => onFocus(own), [own, onFocus]);
   const focusDelta = focus ? (shown[focus.key] ?? [0, 0]) : null;
   const pieceName = (h: Handle) => pattern.pieces.find((p) => p.id === h.piece)?.name ?? "";
 
@@ -363,9 +362,11 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
                   {handles.map((h) => {
                     const cx = h.pos[0] + slot.ox, cy = slot.oy - h.pos[1];
                     const edited = !!shown[h.key];
-                    const sel = selected === h.key;
+                    // Under the pointer (here or on the garment in 3D) or dragged: filled with the outline's colour.
+                    const hot = hovered === h.key || focusKey === h.key || dragged === h.key;
+                    const sel = hot || selected === h.key;
                     const common = {
-                      fill: edited ? "var(--color-ink)" : "white",
+                      fill: hot ? "#c0643e" : edited ? "var(--color-ink)" : "white",
                       stroke: sel ? "#c0643e" : "var(--color-ink)",
                       strokeWidth: px(sel ? 2.5 : 1.5),
                       style: { cursor: h.axis === "vertical" ? "ns-resize" : h.axis === "horizontal" ? "ew-resize" : "move" },
@@ -424,7 +425,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
               <span className="font-medium">{focus.label}</span> · {pieceName(focus)} · Δ {signed(focusDelta[0])} / {signed(focusDelta[1])} cm
             </p>
           ) : (
-            <p>Glisser un point (Maj : axe) · double-clic : rétablir · flèches : 1 mm (Maj : 1 cm) · molette : zoom</p>
+            <p>Glisser un point, ici ou sur le vêtement en 3D (Maj : axe) · double-clic : rétablir · flèches : 1 mm (Maj : 1 cm) · molette : zoom</p>
           )}
         </div>
       </div>

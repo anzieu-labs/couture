@@ -1,6 +1,6 @@
 import type { SkinWeights } from "../avatar/anny";
 import type { TorsoFrame } from "../avatar/bodyMeasures";
-import type { Side } from "../avatar/motion";
+import type { Posture, Side } from "../avatar/motion";
 import type { Pattern } from "../pattern/types";
 import type { SdfGrid } from "../sim/bodySdf";
 import type { ClothModel, ClothParams } from "../sim/model";
@@ -36,10 +36,10 @@ export interface MotionSettings {
   walking: boolean;
   /** Steps per minute. */
   cadence: number;
-  /** Arm spread (degrees from the body); null: rest pose. */
-  arms: number | null;
   /** Wrist targets (rest frame, m) of the arms placed by hand; null: the arm follows the spread. */
   hands: Record<Side, [number, number, number] | null>;
+  /** Standing, seated or squatting. */
+  posture: Posture;
 }
 
 /** "cpu" mode: motion changes, applied at the simulation's current time. */
@@ -48,9 +48,20 @@ export interface MotionRequest {
   walk?: boolean;
   turn?: boolean;
   cadence?: number;
-  arms?: number | null;
   /** Wrist target of one arm (rest frame, m); null releases it. */
   hand?: { side: Side; target: [number, number, number] | null };
+  posture?: Posture;
+}
+
+/** "cpu" mode: the cloth held by hand (lib/sim/grab.ts), in the body frame (m). */
+export interface GrabRequest {
+  type: "grab";
+  /** Takes hold of the cloth at `point`, on `triangle`. */
+  start?: { triangle: number; point: [number, number, number] };
+  /** Moves the hand. */
+  target?: [number, number, number];
+  /** Lets go. */
+  release?: boolean;
 }
 
 /** "gpu" mode: global intersection analysis (sim/untangle.ts) of read-back positions. */
@@ -60,7 +71,7 @@ export interface TanglesRequest {
   positions: Float32Array;
 }
 
-export type WorkerRequest = DressRequest | MotionRequest | TanglesRequest | { type: "cancel" };
+export type WorkerRequest = DressRequest | MotionRequest | GrabRequest | TanglesRequest | { type: "cancel" };
 
 /** Flat garment mesh as needed for rendering. */
 export interface GarmentGeometry {
@@ -71,14 +82,21 @@ export interface GarmentGeometry {
   thickness: number;
   /** Tensile moduli (N/m), for the fit map. */
   tensile: { warp: number; weft: number };
-  /** Positions before sewing. */
+  /** Positions before sewing, around the body as it stands. */
   initial: Float32Array;
+  /** Simulated time (s) from which the cloth may be held by hand: sewn, self-collisions on. */
+  grabFrom: number;
+  /** How the mesh maps to the pattern (lib/pattern/mesh.ts): piece of each vertex, and the vertices along each pattern edge. */
+  piece: Uint8Array;
+  pieceIds: string[];
+  outline: { piece: string; edge: string; vertices: Uint32Array }[];
 }
 
 export type WorkerResponse =
-  | ({ type: "model"; id: number; model: ClothModel; sdf: SdfGrid } & GarmentGeometry)
+  /** `restPose`: the positions before sewing around the body's rest pose (the collision space). */
+  | ({ type: "model"; id: number; model: ClothModel; sdf: SdfGrid; restPose: Float32Array } & GarmentGeometry)
   | ({ type: "mesh"; id: number } & GarmentGeometry)
-  /** `bones`: transforms of the body pose the positions were simulated with (null: rest pose). */
-  | { type: "frame"; id: number; positions: Float32Array; progress: number; bones: Float32Array | null }
+  /** `time`: simulated time; `bones`: transforms of the body pose the positions were simulated with (null: rest pose). */
+  | { type: "frame"; id: number; positions: Float32Array; time: number; progress: number; bones: Float32Array | null }
   | { type: "tangles"; id: number; tangle: Float32Array }
   | { type: "error"; id: number; message: string };

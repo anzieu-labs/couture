@@ -1,5 +1,5 @@
 import { capeAutoLength, DEFAULT_CAPE, draftCape, type CapeParams } from "./cape";
-import { DEFAULT_SKIRT, draftSkirt, skirtAutoLength, type SkirtParams } from "./skirt";
+import { DEFAULT_SKIRT, draftSkirt, NO_WAISTBAND, skirtAutoLength, type SkirtParams } from "./skirt";
 import { DEFAULT_TSHIRT, draftTShirt, type TShirtParams } from "./tshirt";
 import type { BodyMeasures, GarmentKind, Pattern, PatternEdits } from "./types";
 
@@ -15,6 +15,11 @@ export interface ParamSpec {
   step?: number;
   /** Value 0 means "automatic", worked out from the body (double-click on the slider). */
   auto?: (m: BodyMeasures) => number;
+  /** Unit shown after the value (default: cm). */
+  unit?: string;
+  /** Labels under both ends of the slider, and the text shown instead of the value at its maximum. */
+  ends?: [string, string];
+  maxLabel?: string;
 }
 
 export interface GarmentDef {
@@ -74,6 +79,7 @@ export const GARMENTS: GarmentDef[] = [
       { key: "waistEase", label: "Aisance taille", min: 0, max: 10 },
       { key: "hipEase", label: "Aisance hanches", min: 0, max: 16 },
       { key: "flare", label: "Évasement (par côté)", min: 0, max: 30 },
+      { key: "waistband", label: "Élasticité de la ceinture", min: 0, max: NO_WAISTBAND, unit: "%", ends: ["rigide", "sans ceinture"], maxLabel: "sans ceinture" },
     ],
     defaults: { ...DEFAULT_SKIRT },
     draft: (m, p, e) => draftSkirt(m, p as unknown as SkirtParams, e),

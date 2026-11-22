@@ -17,8 +17,12 @@ export interface GarmentMesh {
   /** Piece index of each vertex. */
   piece: Uint8Array;
   pieceIds: PieceId[];
+  /** Mesh vertices along each pattern edge, in loop order (both end points included). */
+  edges: { piece: PieceId; edge: string; vertices: Uint32Array }[];
   /** Stitched vertex pairs. */
   seams: Uint32Array;
+  /** Bands (Pattern.bands): the mesh edges along each, as vertex pairs, and its elasticity. */
+  bands: { segments: Uint32Array; stretch: number }[];
 }
 
 function distToSegment(p: P2, a: P2, b: P2): number {
@@ -171,11 +175,23 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
     for (let i = 0; i < va.length; i++) seams.push(va[i], vb[i]);
   }
 
+  // 5. Bands: the boundary edges along their pattern edges.
+  const bands = (pattern.bands ?? []).map((band) => {
+    const pairs: number[] = [];
+    for (const { piece, edge } of band.edges) {
+      const verts = edgeVerts.get(key(piece, edge)) ?? [];
+      for (let i = 1; i < verts.length; i++) pairs.push(verts[i - 1], verts[i]);
+    }
+    return { segments: Uint32Array.from(pairs), stretch: band.stretch };
+  });
+
   return {
     rest: new Float32Array(rest),
     triangles: new Uint32Array(tris),
     piece: Uint8Array.from(pieceOf),
     pieceIds: pattern.pieces.map((p) => p.id),
+    edges: pattern.pieces.flatMap((p) => p.edges.map((e) => ({ piece: p.id, edge: e.id, vertices: Uint32Array.from(edgeVerts.get(key(p.id, e.id))!) }))),
     seams: new Uint32Array(seams),
+    bands,
   };
 }

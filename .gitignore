@@ -43,3 +43,6 @@ next-env.d.ts
 # python tooling
 tools/**/.venv/
 __pycache__/
+
+# simulation bench runs (machine-specific timings)
+/tools/sim-bench/results/

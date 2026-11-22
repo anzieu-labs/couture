@@ -1,11 +1,14 @@
 import { BONE_STRIDE } from "../../avatar/skeleton";
 import type { SdfGrid } from "../bodySdf";
 import type { PoseAt } from "../cloth";
-import { substepState, type ClothModel } from "../model";
+import { GRAB, selfInterval, type GrabPatch } from "../grab";
+import { assembling, substepState, sweepPlan, type ClothModel } from "../model";
 import { SELF_CELLS_PER_AXIS } from "../selfCollision";
 import {
+  bandsWGSL,
   bendingWGSL,
   contactsWGSL,
+  grabWGSL,
   integrateWGSL,
   motionWGSL,
   resetWGSL,
@@ -26,16 +29,20 @@ import {
 
 const UNIFORM_SLOT = 256; // minUniformBufferOffsetAlignment
 const SUBSTEP_SIZE = 32;
+const GRAB_SIZE = 32;
 
 /**
  * WebGPU implementation of the XPBD cloth solver (compute shaders, graph-
  * coloured constraints). One command buffer per frame: every substep and every
  * colour is a dispatch inside a single compute pass; WebGPU orders dispatches
  * that touch the same storage buffers, so colours run one after another while
- * the constraints of a colour run in parallel.
+ * the constraints of a colour run in parallel. Bands (waistbands, model.ts BandModel) are
+ * solved after the sweeps, one invocation each.
  *
  * Runs on the renderer's device: positions never leave the GPU (GpuClothShell
- * turns them into the rendered vertex buffers). An animated body is collided
+ * turns them into the rendered vertex buffers; readPositions copies them back, for the
+ * intersection analyses and for picking). The cloth may be held by hand (setGrab,
+ * lib/sim/grab.ts). An animated body is collided
  * with in rest space (lib/sim/posedBody.ts): the bone transforms of every
  * substep are uploaded with each frame. Self-collisions (lib/sim/selfCollision.ts)
  * run every `self.interval` substeps: for triangles then edges, hash (count,
@@ -51,7 +58,11 @@ export class GpuClothSolver {
   readonly positions: GPUBuffer;
   private readonly frameUniform: GPUBuffer;
   private readonly substepUniform: GPUBuffer;
-  private readonly encodeFrame: (encoder: GPUCommandEncoder) => void;
+  /**
+   * `early`: the garment is still being assembled at the start of the frame (model.ts sweepPlan);
+   * `held`: the cloth is held by hand or still falling back (grab.ts selfInterval).
+   */
+  private readonly encodeFrame: (encoder: GPUCommandEncoder, early: boolean, held: boolean) => void;
   private readonly encodeMotion: (encoder: GPUCommandEncoder) => void;
   private readonly motionReadback: GPUBuffer;
   private readonly tangle: GPUBuffer | null = null;
@@ -63,8 +74,25 @@ export class GpuClothSolver {
   private motionPending = false;
   /** Latest measured motion: mean and max vertex speed (m/s), and the simulated time it was taken at. */
   motion: { mean: number; max: number; time: number } | null = null;
+  private readonly held: GPUBuffer;
+  private readonly grabUniform: GPUBuffer;
+  /** The cloth held by hand: vertex count, inverse mass of the held point, and where the hand goes during the next frames. */
+  private grab: { count: number; mobility: number; from: [number, number, number]; to: [number, number, number] } | null = null;
+  /** Simulated time until which the cloth let go is still falling back. */
+  private heldUntil = -Infinity;
 
-  constructor(private readonly device: GPUDevice, private readonly m: ClothModel, initial: Float32Array, sdf: SdfGrid, boneCount = 0) {
+  /**
+   * `initial`: where the cloth starts (around the body as posed at time 0); `restPose`: the
+   * same positions around the body's rest pose, the collision space (default: the same).
+   */
+  constructor(
+    private readonly device: GPUDevice,
+    private readonly m: ClothModel,
+    initial: Float32Array,
+    sdf: SdfGrid,
+    boneCount = 0,
+    restPose: Float32Array = initial,
+  ) {
     const p = m.params;
     const n = m.vertexCount;
     const S = GPUBufferUsage.STORAGE, D = GPUBufferUsage.COPY_DST;
@@ -93,19 +121,20 @@ export class GpuClothSolver {
     const seams = storage(m.seams), seamStart = storage(m.seamStart);
     const onSeam = storage(m.onSeam);
     const sdfData = storage(sdf.data);
-    const restPos = storage(initial);
+    const restPos = storage(restPose);
     const skin = storage(sdf.skin ?? new Uint32Array(4));
     // Animated body: posing needs the skin grid.
     this.boneCount = sdf.skin ? boneCount : 0;
     this.boneScratch = new Float32Array(Math.max(4, this.boneCount * BONE_STRIDE * p.substeps));
     this.bones = storage(this.boneScratch);
 
-    this.frameUniform = uniform(16);
+    this.frameUniform = uniform(32);
     this.substepUniform = uniform(UNIFORM_SLOT * p.substeps);
     const grid = uniform(32);
     const g = new ArrayBuffer(32);
     new Float32Array(g, 0, 4).set([sdf.min[0], sdf.min[1], sdf.min[2], sdf.h]);
-    new Uint32Array(g, 16, 4).set([sdf.nx, sdf.ny, sdf.nz, 0]);
+    new Uint32Array(g, 16, 3).set([sdf.nx, sdf.ny, sdf.nz]);
+    new Float32Array(g, 28, 1)[0] = Math.max(p.floorY, -1e9); // the floor (−∞: none)
     device.queue.writeBuffer(grid, 0, g);
 
     const colorRanges = [...m.edgeColors, ...m.bendColors, ...m.seamColors];
@@ -138,6 +167,16 @@ export class GpuClothSolver {
     const sew = pipeline(seamsWGSL);
     const contacts = pipeline(contactsWGSL);
     const velocity = pipeline(velocityWGSL);
+    // The hand: one invocation, while the cloth is held.
+    const grab = pipeline(grabWGSL);
+    this.held = storage(new Float32Array(4 * GRAB.capacity));
+    this.grabUniform = uniform(UNIFORM_SLOT * p.substeps);
+    const grab0 = group(grab, 0, [this.positions, this.held]);
+    const grab1 = Array.from({ length: p.substeps }, (_, s) => group(grab, 1, [frame, { buffer: this.grabUniform, offset: UNIFORM_SLOT * s, size: GRAB_SIZE }]));
+    // Bands (waistbands): one invocation each.
+    const bandCount = m.bands.rest.length;
+    const bands = bandCount ? pipeline(bandsWGSL) : null;
+    const bands0 = bands && group(bands, 0, [this.positions, invMass, storage(m.bands.ranges), storage(m.bands.rest), storage(m.bands.segments), storage(m.bands.vertices)]);
 
     // Self-collisions.
     const self = m.self;
@@ -231,7 +270,7 @@ export class GpuClothSolver {
       sew1: substeps.map((s) =>
         m.seamColors.map((_, c) => group(sew, 1, [substepSlot(s), rangeSlot(m.edgeColors.length + m.bendColors.length + c)])),
       ),
-      contacts0: group(contacts, 0, [this.positions, onSeam, sdfData, restPos, skin, this.bones]),
+      contacts0: group(contacts, 0, [this.positions, onSeam, sdfData, restPos, skin, this.bones, prev, storage(sdf.limbs)]),
       contacts1: substeps.map((s) => group(contacts, 1, [frame, substepSlot(s), grid])),
       velocity0: group(velocity, 0, [this.positions, prev, vel]),
       velocity1: group(velocity, 1, [frame]),
@@ -255,8 +294,13 @@ export class GpuClothSolver {
       return [fwd, fwd.slice().reverse()];
     };
     const sweeps = { edges: order(m.edgeColors.length), bend: order(m.bendColors.length), seams: order(m.seamColors.length) };
+    const plans = {
+      assembling: [sweepPlan(p, 0, true), sweepPlan(p, 1, true)],
+      draping: [sweepPlan(p, 0, false), sweepPlan(p, 1, false)],
+    };
 
-    this.encodeFrame = (encoder) => {
+    this.encodeFrame = (encoder, early, held) => {
+      const selfEvery = selfInterval(p, held);
       const pass = encoder.beginComputePass();
       let current: GPUComputePipeline | null = null;
       const run = (pipe: GPUComputePipeline, g0: GPUBindGroup, g1: GPUBindGroup | null, count: number) => {
@@ -272,13 +316,28 @@ export class GpuClothSolver {
       for (const s of substeps) {
         run(reset, bg.reset0, null, lambdaCount);
         run(integrate, bg.integrate0, bg.integrate1[s], n);
-        // Symmetric Gauss-Seidel over colours: forward then backward sweep.
-        for (let sweep = 0; sweep < 2; sweep++) {
-          for (const c of sweeps.edges[sweep]) run(stretch, bg.stretch0, bg.stretch1[c], m.edgeColors[c][1]);
-          for (const c of sweeps.bend[sweep]) run(bending, bg.bending0, bg.bending1[c], m.bendColors[c][1]);
-          for (const c of sweeps.seams[sweep]) run(sew, bg.sew0, bg.sew1[s][c], m.seamColors[c][1]);
+        if (this.grab) {
+          // An external force: on the predicted positions, before the sweeps.
+          pass.setPipeline(grab);
+          pass.setBindGroup(0, grab0);
+          pass.setBindGroup(1, grab1[s]);
+          pass.dispatchWorkgroups(1);
+          current = null;
         }
-        if (selfGroups && self && (s + 1) % self.interval === 0)
+        // Symmetric Gauss-Seidel over colours: sweeps alternately forward and backward (model.ts sweepPlan).
+        for (const { reverse, bending: bend } of (early ? plans.assembling : plans.draping)[s & 1]) {
+          const dir = reverse ? 1 : 0;
+          for (const c of sweeps.edges[dir]) run(stretch, bg.stretch0, bg.stretch1[c], m.edgeColors[c][1]);
+          if (bend) for (const c of sweeps.bend[dir]) run(bending, bg.bending0, bg.bending1[c], m.bendColors[c][1]);
+          for (const c of sweeps.seams[dir]) run(sew, bg.sew0, bg.sew1[s][c], m.seamColors[c][1]);
+        }
+        if (bands && bands0) {
+          pass.setPipeline(bands);
+          pass.setBindGroup(0, bands0);
+          pass.dispatchWorkgroups(bandCount);
+          current = null;
+        }
+        if (selfGroups && self && (s + 1) % selfEvery === 0)
           for (const k of selfGroups(s)) {
             current = null; // the same pipeline runs on the triangle and the edge tables
             run(k.pipe, k.g0, k.g1, k.count);
@@ -299,11 +358,23 @@ export class GpuClothSolver {
     const p = this.m.params;
     const h = dt / p.substeps;
     const offset = p.skinGap + p.thickness / 2;
-    this.device.queue.writeBuffer(this.frameUniform, 0, new Float32Array([h, Math.exp(-p.damping * h), p.friction, offset]));
+    this.device.queue.writeBuffer(this.frameUniform, 0, new Float32Array([h, Math.exp(-p.damping * h), p.friction, offset, p.thickness / 2, 0, 0, 0]));
     const slot = new ArrayBuffer(UNIFORM_SLOT * p.substeps);
     const stride = this.boneCount * BONE_STRIDE;
+    const grab = this.grab;
+    const hand = grab && new ArrayBuffer(UNIFORM_SLOT * p.substeps);
     for (let f = 0; f < frames; f++) {
       let anyPosed = false;
+      if (grab && hand) {
+        // The hand moves evenly over the frames queued by this call.
+        for (let s = 0; s < p.substeps; s++) {
+          const k = (f * p.substeps + s + 1) / (frames * p.substeps);
+          new Float32Array(hand, UNIFORM_SLOT * s, 3).set(grab.from.map((x, a) => x + (grab.to[a] - x) * k));
+          new Uint32Array(hand, UNIFORM_SLOT * s + 12, 1)[0] = grab.count;
+          new Float32Array(hand, UNIFORM_SLOT * s + 16, 4).set([GRAB.stiffness, GRAB.force, grab.mobility, GRAB.acceleration]);
+        }
+        this.device.queue.writeBuffer(this.grabUniform, 0, hand);
+      }
       for (let s = 0; s < p.substeps; s++) {
         const st = substepState(p, this.time + s * h);
         // Same convention as the CPU solver: the pose at the end of the substep.
@@ -316,11 +387,36 @@ export class GpuClothSolver {
       this.device.queue.writeBuffer(this.substepUniform, 0, slot);
       if (anyPosed) this.device.queue.writeBuffer(this.bones, 0, this.boneScratch as Float32Array<ArrayBuffer>);
       const encoder = this.device.createCommandEncoder();
-      this.encodeFrame(encoder);
+      this.encodeFrame(encoder, assembling(p, this.time), !!grab || this.time < this.heldUntil);
       if (f === frames - 1) after?.(encoder);
       this.device.queue.submit([encoder.finish()]);
       this.time += dt;
     }
+    if (grab && frames > 0) grab.from = grab.to;
+  }
+
+  /** Takes hold of the cloth by `patch` (lib/sim/grab.ts), the hand at `target`; null lets go. */
+  setGrab(patch: GrabPatch | null, target: readonly [number, number, number] = [0, 0, 0]) {
+    if (!patch) {
+      if (this.grab) this.heldUntil = this.time + GRAB.settle;
+      this.grab = null;
+      return;
+    }
+    const count = patch.indices.length;
+    const data = new ArrayBuffer(16 * count);
+    const index = new Uint32Array(data), value = new Float32Array(data);
+    for (let k = 0; k < count; k++) {
+      index[4 * k] = patch.indices[k];
+      value[4 * k + 1] = patch.shares[k];
+      value[4 * k + 2] = patch.gains[k];
+    }
+    this.device.queue.writeBuffer(this.held, 0, data);
+    this.grab = { count, mobility: patch.mobility, from: [...target], to: [...target] };
+  }
+
+  /** Moves the hand: it gets there over the frames queued by the next `simulate`. */
+  moveGrab(target: readonly [number, number, number]) {
+    if (this.grab) this.grab.to = [...target];
   }
 
   /**

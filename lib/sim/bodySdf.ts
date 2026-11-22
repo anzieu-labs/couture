@@ -35,12 +35,21 @@ export interface SdfGrid {
   readonly nz: number;
   readonly min: [number, number, number];
   readonly h: number;
+  /**
+   * Limbs tested on their own (lib/sim/posedBody.ts), 8 floats each: centre and radius of a
+   * sphere around the limb's skin in the rest pose, then its bone index (and 3 unused).
+   */
+  readonly limbs: Float32Array;
 }
+
+/** Floats per limb in SdfGrid.limbs. */
+export const LIMB_STRIDE = 8;
 
 export class BodySdf implements SdfGrid {
   /** Distances, x fastest. */
   readonly data: Float32Array;
   readonly skin: Uint32Array | null = null;
+  readonly limbs: Float32Array;
   readonly nx: number;
   readonly ny: number;
   readonly nz: number;
@@ -54,6 +63,8 @@ export class BodySdf implements SdfGrid {
     band = 0.05,
     skin?: SkinWeights,
     inflate?: Inflation,
+    /** Bones of the limbs tested on their own (SdfGrid.limbs). */
+    limbs: number[] = [],
   ) {
     const nx = (this.nx = Math.ceil((max[0] - min[0]) / h) + 1);
     const ny = (this.ny = Math.ceil((max[1] - min[1]) / h) + 1);
@@ -145,6 +156,21 @@ export class BodySdf implements SdfGrid {
     }
 
     if (skin && nearest) this.skin = skinGrid(nearest, skin, nx, ny, nz);
+
+    // Bounding sphere of each limb's skin (the vertices mostly driven by its bone), with room
+    // for the contact offset and the inflation.
+    this.limbs = new Float32Array(LIMB_STRIDE * (skin ? limbs.length : 0));
+    if (skin)
+      limbs.forEach((bone, l) => {
+        const own: number[] = [];
+        for (let v = 0; v < positions.length / 3; v++)
+          for (let k = 0; k < 4; k++) if (skin.index[4 * v + k] === bone && skin.weight[4 * v + k] >= 128) own.push(v);
+        const c = [0, 0, 0];
+        for (const v of own) for (let a = 0; a < 3; a++) c[a] += positions[3 * v + a] / own.length;
+        let radius = 0;
+        for (const v of own) radius = Math.max(radius, Math.hypot(positions[3 * v] - c[0], positions[3 * v + 1] - c[1], positions[3 * v + 2] - c[2]));
+        this.limbs.set([c[0], c[1], c[2], own.length ? radius + 0.03 : 0, bone], LIMB_STRIDE * l);
+      });
   }
 
   /** Trilinear distance; large positive outside the grid. */

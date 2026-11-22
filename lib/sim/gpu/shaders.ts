@@ -4,13 +4,14 @@
  * Each constraint kernel solves one colour: no two threads touch the same vertex.
  */
 
-import { POSE_TOLERANCE } from "../posedBody";
+import { PLINTH } from "../model";
+import { IMPACT_MARGIN, IMPACT_SPEED, POSE_TOLERANCE } from "../posedBody";
 import { NEAR_MARGIN, SELF_CELLS_PER_AXIS, SELF_MAX_CANDIDATES } from "../selfCollision";
 
 export const WORKGROUP = 64;
 
 const common = /* wgsl */ `
-struct Frame { h: f32, damp: f32, friction: f32, offset: f32 }
+struct Frame { h: f32, damp: f32, friction: f32, offset: f32, halfThickness: f32, pad0: f32, pad1: f32, pad2: f32 }
 // posed: the body is animated; bones: first vec4 of this substep's bone transforms.
 struct Substep { gravity: f32, sewK: f32, sewing: u32, posed: u32, bones: u32, selfActive: u32, pad1: u32, pad2: u32 }
 struct Range { start: u32, count: u32, pad0: u32, pad1: u32 }
@@ -41,6 +42,32 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     prev[o + a] = pos[o + a];
     pos[o + a] += vel[o + a] * frame.damp * frame.h;
   }
+}`;
+
+/**
+ * The cloth held by hand (lib/sim/grab.ts solveGrab, same formulas): one invocation gathers
+ * the held point and pulls the patch towards the hand.
+ */
+export const grabWGSL = /* wgsl */ `
+struct Held { index: u32, share: f32, gain: f32, pad: f32 }
+struct Grab { goal: vec3f, count: u32, stiffness: f32, force: f32, mobility: f32, acceleration: f32 }
+@group(0) @binding(0) var<storage, read_write> pos: array<f32>;
+@group(0) @binding(1) var<storage, read> held: array<Held>;
+@group(1) @binding(0) var<uniform> frame: Frame;
+@group(1) @binding(1) var<uniform> grab: Grab;
+${common}
+@compute @workgroup_size(1)
+fn main() {
+  var c = vec3f(0.0);
+  for (var k = 0u; k < grab.count; k++) { c += held[k].share * getP(held[k].index); }
+  let d = grab.goal - c;
+  let len = length(d);
+  if (len < 1e-9) { return; }
+  let h2 = frame.h * frame.h;
+  // Implicit spring on the held point, capped.
+  let force = min(min(grab.stiffness * len / (1.0 + grab.stiffness * h2 * grab.mobility), grab.force), grab.acceleration / grab.mobility);
+  let s = force * h2 / len;
+  for (var k = 0u; k < grab.count; k++) { addP(held[k].index, d * (s * held[k].gain)); }
 }`;
 
 export const resetWGSL = /* wgsl */ `
@@ -143,20 +170,63 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   addP(b, d * (f * wb));
 }`;
 
-export const contactsWGSL = /* wgsl */ `
-struct Grid { min: vec3f, h: f32, dims: vec3u, pad: u32 }
+/**
+ * Bands (model.ts BandModel): one invocation per band — a few hundred vertices at most. A
+ * band longer than its rest length is scaled down about its centre of mass.
+ */
+export const bandsWGSL = /* wgsl */ `
+struct Band { segment: u32, segments: u32, vertex: u32, vertices: u32 }
+@group(0) @binding(0) var<storage, read_write> pos: array<f32>;
+@group(0) @binding(1) var<storage, read> invMass: array<f32>;
+@group(0) @binding(2) var<storage, read> bands: array<Band>;
+@group(0) @binding(3) var<storage, read> rest: array<f32>;
+@group(0) @binding(4) var<storage, read> segments: array<u32>;
+@group(0) @binding(5) var<storage, read> vertices: array<u32>;
+${common}
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let b = id.x;
+  if (b >= arrayLength(&rest)) { return; }
+  let band = bands[b];
+  var total = 0.0;
+  for (var k = 0u; k < band.segments; k++) {
+    let o = 2u * (band.segment + k);
+    total += distance(getP(segments[o]), getP(segments[o + 1u]));
+  }
+  // A band does not push: the fabric may gather along it.
+  if (total <= rest[b]) { return; }
+  var centre = vec3f(0.0);
+  var mass = 0.0;
+  for (var k = 0u; k < band.vertices; k++) {
+    let v = vertices[band.vertex + k];
+    let w = invMass[v];
+    if (w == 0.0) { continue; }
+    centre += getP(v) / w;
+    mass += 1.0 / w;
+  }
+  if (mass == 0.0) { return; }
+  centre /= mass;
+  let scale = rest[b] / total;
+  for (var k = 0u; k < band.vertices; k++) {
+    let v = vertices[band.vertex + k];
+    if (invMass[v] == 0.0) { continue; }
+    let p = centre + (getP(v) - centre) * scale;
+    pos[3u * v] = p.x;
+    pos[3u * v + 1u] = p.y;
+    pos[3u * v + 2u] = p.z;
+  }
+}`;
+
+/**
+ * Body field shared by the contact kernels: distance grid, skin influences, bone transforms
+ * (expects the bindings sdf, skin, bones and the uniforms grid, substep).
+ */
+const bodyFieldWGSL = /* wgsl */ `
+// floor: height of the floor under the feet, the top of the plinth (model.ts PLINTH); very low: none.
+struct Grid { min: vec3f, h: f32, dims: vec3u, floor: f32 }
 /** 3×4 affine transform, one row per vector. */
 struct Affine { r0: vec4f, r1: vec4f, r2: vec4f }
-@group(0) @binding(0) var<storage, read_write> pos: array<f32>;
-@group(0) @binding(1) var<storage, read> onSeam: array<u32>;
-@group(0) @binding(2) var<storage, read> sdf: array<f32>;
-@group(0) @binding(3) var<storage, read_write> restPos: array<f32>;
-@group(0) @binding(4) var<storage, read> skin: array<u32>;
-@group(0) @binding(5) var<storage, read> bones: array<vec4f>;
-@group(1) @binding(0) var<uniform> frame: Frame;
-@group(1) @binding(1) var<uniform> substep: Substep;
-@group(1) @binding(2) var<uniform> grid: Grid;
-${common}
+
 fn cell(i: u32, j: u32, k: u32) -> f32 { return sdf[i + grid.dims.x * (j + grid.dims.y * k)]; }
 
 fn sampleSdf(p: vec3f) -> f32 {
@@ -216,7 +286,37 @@ fn applyInverse(a: Affine, p: vec3f) -> vec3f {
   return select(vec3f(0.0), (c0 * d.x + c1 * d.y + c2 * d.z) / det, det != 0.0);
 }
 
+// Unit outward direction (normalized gradient of the distance).
+fn sdfGradient(q: vec3f) -> vec3f {
+  let e = grid.h * 0.5;
+  let g = vec3f(
+    sampleSdf(q + vec3f(e, 0.0, 0.0)) - sampleSdf(q - vec3f(e, 0.0, 0.0)),
+    sampleSdf(q + vec3f(0.0, e, 0.0)) - sampleSdf(q - vec3f(0.0, e, 0.0)),
+    sampleSdf(q + vec3f(0.0, 0.0, e)) - sampleSdf(q - vec3f(0.0, 0.0, e)),
+  );
+  let gl = length(g);
+  return select(vec3f(0.0, 1.0, 0.0), g / gl, gl > 0.0);
+}
+
 fn getR(i: u32) -> vec3f { return vec3f(restPos[3u * i], restPos[3u * i + 1u], restPos[3u * i + 2u]); }
+`;
+
+export const contactsWGSL = /* wgsl */ `
+@group(0) @binding(0) var<storage, read_write> pos: array<f32>;
+@group(0) @binding(1) var<storage, read> onSeam: array<u32>;
+@group(0) @binding(2) var<storage, read> sdf: array<f32>;
+@group(0) @binding(3) var<storage, read_write> restPos: array<f32>;
+@group(0) @binding(4) var<storage, read> skin: array<u32>;
+@group(0) @binding(5) var<storage, read> bones: array<vec4f>;
+@group(0) @binding(6) var<storage, read> prev: array<f32>;
+// Limbs tested on their own (SdfGrid.limbs): sphere (centre, radius), then the bone index.
+@group(0) @binding(7) var<storage, read> limbs: array<vec4f>;
+@group(1) @binding(0) var<uniform> frame: Frame;
+@group(1) @binding(1) var<uniform> substep: Substep;
+@group(1) @binding(2) var<uniform> grid: Grid;
+${common}
+${bodyFieldWGSL}
+
 
 // Body contacts, in rest space when the body is animated: restPos holds the
 // rest-space position of the previous substep, so friction acts on the motion
@@ -241,17 +341,70 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     consistent = dot(e, e) < ${POSE_TOLERANCE * POSE_TOLERANCE};
   }
   // Seam vertices may cross the body while the seams are being closed.
-  let d = select(sampleSdf(q), 1e9, !consistent || (substep.sewing != 0u && onSeam[i] != 0u));
-  if (d < frame.offset) {
-    let e = grid.h * 0.5;
-    var g = vec3f(
-      sampleSdf(q + vec3f(e, 0.0, 0.0)) - sampleSdf(q - vec3f(e, 0.0, 0.0)),
-      sampleSdf(q + vec3f(0.0, e, 0.0)) - sampleSdf(q - vec3f(0.0, e, 0.0)),
-      sampleSdf(q + vec3f(0.0, 0.0, e)) - sampleSdf(q - vec3f(0.0, 0.0, e)),
-    );
-    let gl = length(g);
-    g = select(vec3f(0.0, 1.0, 0.0), g / gl, gl > 0.0);
-    let push = frame.offset - d;
+  let free = substep.sewing != 0u && onSeam[i] != 0u;
+  let d = select(sampleSdf(q), 1e9, !consistent || free);
+  // Impact: cloth moving fast relative to the skin of a limb (posedBody.ts) — 0: none, 1: full.
+  // The skin offset then grows with that speed.
+  let rel = distance(q, r);
+  var impact = 0.0;
+  if (posed && rel > ${IMPACT_SPEED.from.toFixed(2)} * frame.h) {
+    for (var l = 0u; l < arrayLength(&limbs) / 2u; l++) {
+      let sphere = limbs[2u * l];
+      let c = q - sphere.xyz;
+      if (dot(c, c) <= sphere.w * sphere.w) {
+        impact = smoothstep(${IMPACT_SPEED.from.toFixed(2)}, ${IMPACT_SPEED.to.toFixed(2)}, rel / frame.h);
+        break;
+      }
+    }
+  }
+  let offset = frame.offset + impact * min(${IMPACT_MARGIN.max}, ${IMPACT_MARGIN.time} / frame.h * rel);
+  var p = p0;
+  if (posed && !free && d >= offset) {
+    // No contact where the vertex comes from: a limb swung far from its rest place may still be
+    // going through it (posedBody.ts). The deepest one pushes it out, and the vertex is followed
+    // on that limb from now on.
+    var deepest = offset;
+    var hit = vec3f(0.0);
+    var hitA: Affine;
+    for (var l = 0u; l < arrayLength(&limbs) / 2u; l++) {
+      let sphere = limbs[2u * l];
+      let bi = substep.bones + 3u * u32(limbs[2u * l + 1u].x);
+      let bone = Affine(bones[bi], bones[bi + 1u], bones[bi + 2u]);
+      // The sphere as posed (the limb's bone is rigid): a cheap first test.
+      let away = p0 - applyAffine(bone, sphere.xyz);
+      if (dot(away, away) > sphere.w * sphere.w) { continue; }
+      let ql = applyInverse(bone, p0);
+      let dl = sampleSdf(ql);
+      if (dl >= deepest) { continue; }
+      let al = blendAt(ql);
+      let el = applyAffine(al, ql) - p0;
+      if (dot(el, el) >= ${POSE_TOLERANCE * POSE_TOLERANCE}) { continue; }
+      deepest = dl;
+      hit = ql;
+      hitA = al;
+    }
+    if (deepest < offset) {
+      q = hit + sdfGradient(hit) * (offset - deepest);
+      p = applyAffine(hitA, q);
+    }
+  }
+  if (d < offset) {
+    // Where the vertex entered the body, on its way from where it was against the skin.
+    let path = q - r;
+    var stick = 0.0;
+    var entry = q;
+    if (impact > 0.0 && sampleSdf(r) >= offset) {
+      var lo = 0.0;
+      var hi = 1.0;
+      for (var it = 0; it < 5; it++) {
+        let mid = 0.5 * (lo + hi);
+        if (sampleSdf(r + path * mid) >= offset) { lo = mid; } else { hi = mid; }
+      }
+      entry = r + path * lo;
+      stick = impact;
+    }
+    let g = sdfGradient(q);
+    let push = offset - d;
     q += g * push;
     // Coulomb friction (Macklin et al. 2014), proportional to the contact push:
     // static below μ·push of tangential motion, kinetic above.
@@ -260,14 +413,48 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let lt = length(t);
     let limit = frame.friction * push;
     q -= t * select(limit / lt, 1.0, lt <= limit);
-    let p = select(q, applyAffine(a, q), posed);
-    pos[3u * i] = p.x;
-    pos[3u * i + 1u] = p.y;
-    pos[3u * i + 2u] = p.z;
+    // Hit at speed: the vertex stays where it was hit instead of sliding round the limb (posedBody.ts).
+    q = mix(q, entry, stick);
+    p = select(q, applyAffine(a, q), posed);
   }
   restPos[3u * i] = q.x;
   restPos[3u * i + 1u] = q.y;
   restPos[3u * i + 2u] = q.z;
+  // The floor (world space: it does not move with the body): the plinth, a cylinder standing on
+  // the ground. A vertex inside it leaves by the nearest face, its top or its side (cloth.ts
+  // solveContacts); same Coulomb friction, against the motion since the start of the substep.
+  let half = frame.halfThickness;
+  let up = grid.floor + half - p.y;
+  let rad = length(p.xz);
+  let out = ${PLINTH.radius} + half - rad;
+  var n = vec3f(0.0);
+  var depth = 0.0;
+  if (up > 0.0 && out > 0.0) {
+    if (up <= out || rad < 1e-6) {
+      n = vec3f(0.0, 1.0, 0.0);
+      depth = up;
+    } else {
+      n = vec3f(p.x / rad, 0.0, p.z / rad);
+      depth = out;
+    }
+  } else {
+    let ground = grid.floor - ${PLINTH.height} + half - p.y;
+    if (ground > 0.0) {
+      n = vec3f(0.0, 1.0, 0.0);
+      depth = ground;
+    }
+  }
+  if (depth > 0.0) {
+    p += n * depth;
+    let m = p - vec3f(prev[3u * i], prev[3u * i + 1u], prev[3u * i + 2u]);
+    let t = m - dot(m, n) * n;
+    let lt = length(t);
+    let limit = frame.friction * depth;
+    p -= t * select(limit / lt, 1.0, lt <= limit);
+  }
+  pos[3u * i] = p.x;
+  pos[3u * i + 1u] = p.y;
+  pos[3u * i + 2u] = p.z;
 }`;
 
 export const velocityWGSL = /* wgsl */ `
@@ -275,7 +462,7 @@ export const velocityWGSL = /* wgsl */ `
 @group(0) @binding(1) var<storage, read> prev: array<f32>;
 @group(0) @binding(2) var<storage, read_write> vel: array<f32>;
 @group(1) @binding(0) var<uniform> frame: Frame;
-struct Frame { h: f32, damp: f32, friction: f32, offset: f32 }
+struct Frame { h: f32, damp: f32, friction: f32, offset: f32, halfThickness: f32, pad0: f32, pad1: f32, pad2: f32 }
 @compute @workgroup_size(${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= arrayLength(&vel)) { return; }
