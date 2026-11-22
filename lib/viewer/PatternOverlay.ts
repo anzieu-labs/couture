@@ -29,7 +29,11 @@ const ACCENT = "#c0643e";
 /** Lines are drawn this far off the fabric's faces (m), on both sides: seen from outside and from inside. */
 const LIFT = 0.0012;
 /** Widths (px) of the seam lines and of the other outlines. */
-const WIDTH = { seam: 3.5, plain: 1.5 };
+const WIDTH = { seam: 3.5, plain: 1.5, hot: 7 };
+/** How much of the other lines is left to see while some edges are pointed at. */
+const DIMMED = 0.3;
+const NO_EDGES: ReadonlySet<string> = new Set();
+type Lines = { mesh: LineSegments2; a: Uint32Array; b: Uint32Array; buffer: Float32Array };
 /** Points on screen (px), as in the 2D editor: half side of an anchor's square, radius of a curve control's disc, outline, picking radius. */
 const POINT_PX = { anchor: 5.5, control: 4.5, rim: 1.5, pick: 13 };
 /**
@@ -97,8 +101,11 @@ export class PatternOverlay {
   /** The garment is still falling into its first drape: nothing is drawn. */
   private held = false;
 
-  private seams: { mesh: LineSegments2; a: Uint32Array; b: Uint32Array; buffer: Float32Array } | null = null;
-  private plain: { mesh: LineSegments2; a: Uint32Array; b: Uint32Array; buffer: Float32Array } | null = null;
+  private seams: Lines | null = null;
+  private plain: Lines | null = null;
+  /** The edges pointed at in the 2D editor (a seam of its list): drawn again, wider, over the others dimmed. */
+  private hot: Lines | null = null;
+  private highlight: ReadonlySet<string> = NO_EDGES;
   /** Triangles at each vertex (CSR), for the normals the lines are lifted along. */
   private vertexTris: { start: Uint32Array; list: Uint32Array } | null = null;
   private points: Point[] = [];
@@ -201,6 +208,13 @@ export class PatternOverlay {
     this.paint();
   }
 
+  /** Highlights edges of the pattern on the garment, told as `piece/edge` (those of the seam pointed at in the 2D editor's list); none: an empty set. */
+  setHighlight(edges: ReadonlySet<string>) {
+    this.highlight = edges.size ? edges : NO_EDGES;
+    this.rebuildHot();
+    this.drawLines();
+  }
+
   /** The cloth moved: its mid-surface positions (figure frame). */
   update(positions: Float32Array) {
     this.positions = positions;
@@ -235,16 +249,64 @@ export class PatternOverlay {
   // --- Building ---------------------------------------------------------------
 
   private clear() {
-    for (const l of [this.seams, this.plain]) {
-      if (!l) continue;
-      this.group.remove(l.mesh);
-      l.mesh.geometry.dispose();
-      l.mesh.material.dispose();
-    }
+    for (const l of [this.seams, this.plain, this.hot]) this.drop(l);
     for (const p of this.points) this.group.remove(p.root);
-    this.seams = this.plain = null;
+    this.seams = this.plain = this.hot = null;
     this.points = [];
     this.vertexTris = null;
+  }
+
+  private drop(lines: Lines | null) {
+    if (!lines) return;
+    this.group.remove(lines.mesh);
+    lines.mesh.geometry.dispose();
+    lines.mesh.material.dispose();
+  }
+
+  /** Lines along edges of the garment, each in its colour, `width` pixels wide (their positions are written by drawLines). */
+  private lines(width: number, edges: { vertices: Uint32Array; color: string }[], extra: number): Lines {
+    const count = edges.reduce((s, e) => s + Math.max(0, e.vertices.length - 1), 0);
+    const a = new Uint32Array(count), b = new Uint32Array(count);
+    // Each segment twice (lifted off either face of the fabric), then `extra` free segments.
+    const buffer = new Float32Array(6 * (2 * count + extra)), colors = new Float32Array(buffer.length);
+    const c = new THREE.Color();
+    let k = 0;
+    for (const e of edges) {
+      c.set(e.color);
+      for (let i = 1; i < e.vertices.length; i++, k++) {
+        a[k] = e.vertices[i - 1];
+        b[k] = e.vertices[i];
+        for (const o of [k, count + k]) for (let end = 0; end < 2; end++) colors.set([c.r, c.g, c.b], 6 * o + 3 * end);
+      }
+    }
+    c.set(INK);
+    for (let o = 2 * count; o < 2 * count + extra; o++) for (let end = 0; end < 2; end++) colors.set([c.r, c.g, c.b], 6 * o + 3 * end);
+    const geometry = new LineSegmentsGeometry();
+    geometry.setPositions(buffer);
+    geometry.setColors(colors);
+    const material = new THREE.Line2NodeMaterial({ vertexColors: true, linewidth: width });
+    material.toneMapped = false;
+    const mesh = new LineSegments2(geometry, material);
+    mesh.frustumCulled = false; // positions are rewritten with the simulation
+    this.group.add(mesh);
+    return { mesh, a, b, buffer };
+  }
+
+  /** The highlighted edges drawn over the others, which are dimmed meanwhile. */
+  private rebuildHot() {
+    this.drop(this.hot);
+    this.hot = null;
+    const g = this.garment, colorOf = this.colorOf;
+    const edges = g && colorOf && this.highlight.size ? g.outline.filter((e) => this.highlight.has(`${e.piece}/${e.edge}`)) : [];
+    if (edges.length) {
+      this.hot = this.lines(WIDTH.hot, edges.map((e) => ({ vertices: e.vertices, color: colorOf!(e.piece, e.edge) ?? ACCENT })), 0);
+      this.hot.mesh.renderOrder = 1;
+    }
+    for (const l of [this.seams, this.plain]) {
+      if (!l) continue;
+      l.mesh.material.transparent = !!this.hot;
+      l.mesh.material.opacity = this.hot ? DIMMED : 1;
+    }
   }
 
   private rebuild() {
@@ -262,33 +324,6 @@ export class PatternOverlay {
     this.vertexTris = { start, list };
 
     // Lines: the sewn edges in their seam's colour, the others (hems, openings) in ink.
-    const lines = (width: number, edges: { vertices: Uint32Array; color: string }[], extra: number) => {
-      const count = edges.reduce((s, e) => s + Math.max(0, e.vertices.length - 1), 0);
-      const a = new Uint32Array(count), b = new Uint32Array(count);
-      // Each segment twice (lifted off either face of the fabric), then `extra` free segments.
-      const buffer = new Float32Array(6 * (2 * count + extra)), colors = new Float32Array(buffer.length);
-      const c = new THREE.Color();
-      let k = 0;
-      for (const e of edges) {
-        c.set(e.color);
-        for (let i = 1; i < e.vertices.length; i++, k++) {
-          a[k] = e.vertices[i - 1];
-          b[k] = e.vertices[i];
-          for (const o of [k, count + k]) for (let end = 0; end < 2; end++) colors.set([c.r, c.g, c.b], 6 * o + 3 * end);
-        }
-      }
-      c.set(INK);
-      for (let o = 2 * count; o < 2 * count + extra; o++) for (let end = 0; end < 2; end++) colors.set([c.r, c.g, c.b], 6 * o + 3 * end);
-      const geometry = new LineSegmentsGeometry();
-      geometry.setPositions(buffer);
-      geometry.setColors(colors);
-      const material = new THREE.Line2NodeMaterial({ vertexColors: true, linewidth: width });
-      material.toneMapped = false;
-      const mesh = new LineSegments2(geometry, material);
-      mesh.frustumCulled = false; // positions are rewritten with the simulation
-      this.group.add(mesh);
-      return { mesh, a, b, buffer };
-    };
     const sewn: { vertices: Uint32Array; color: string }[] = [], open: { vertices: Uint32Array; color: string }[] = [];
     for (const e of g.outline) {
       const color = colorOf(e.piece, e.edge);
@@ -296,8 +331,9 @@ export class PatternOverlay {
       else open.push({ vertices: e.vertices, color: INK });
     }
     const dressed = g.pattern.handles;
-    this.seams = lines(WIDTH.seam, sewn, 0);
-    this.plain = lines(WIDTH.plain, open, dressed.filter((h) => h.anchor).length); // + the curve controls' tethers
+    this.seams = this.lines(WIDTH.seam, sewn, 0);
+    this.plain = this.lines(WIDTH.plain, open, dressed.filter((h) => h.anchor).length); // + the curve controls' tethers
+    this.rebuildHot();
 
     // Points: placed by the pattern the garment was cut from, then moved with the pattern being edited.
     for (const h of dressed) {
@@ -392,7 +428,7 @@ export class PatternOverlay {
       const len = Math.hypot(nx, ny, nz) || 1;
       normal[0] = (nx / len) * lift; normal[1] = (ny / len) * lift; normal[2] = (nz / len) * lift;
     };
-    for (const l of [this.seams, this.plain]) {
+    for (const l of [this.seams, this.plain, this.hot]) {
       if (!l) continue;
       const count = l.a.length, out = l.buffer;
       for (let k = 0; k < count; k++)

@@ -189,6 +189,7 @@ export default function Studio() {
     };
   }, [ready, viewerRef]);
   const focusOnGarment = useCallback((key: string | null) => viewerRef.current?.setPatternFocus(key), [viewerRef]);
+  const highlightOnGarment = useCallback((edges: ReadonlySet<string>) => viewerRef.current?.setPatternHighlight(edges), [viewerRef]);
 
 
   const goTo = (v: ViewPreset) => {
@@ -416,6 +417,7 @@ export default function Studio() {
               onLive={setLive}
               focusKey={focus3d}
               onFocus={focusOnGarment}
+              onHighlight={highlightOnGarment}
               onCommit={garment.commit}
               clasps={garment.clasps}
               onClasps={garment.commitClasps}

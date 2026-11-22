@@ -24,6 +24,8 @@ interface Props {
   focusKey: string | null;
   /** The point hovered, dragged or selected here changed: highlighted on the garment. */
   onFocus: (key: string | null) => void;
+  /** The edges of the seam pointed at in the list (`piece/edge`), to be shown on the 3D garment too; none: an empty set. */
+  onHighlight: (edges: ReadonlySet<string>) => void;
   onCommit: (edits: PatternEdits) => void;
   /** Clasps added on the pattern, and how this editor changes them (the "Fermoir" tool). */
   clasps: readonly Clasp[];
@@ -45,6 +47,7 @@ interface Props {
   onClose: () => void;
 }
 
+const NO_HIGHLIGHT: ReadonlySet<string> = new Set();
 const GAP = 8; // cm between pieces
 const ROW_GAP = 14; // cm between rows of pieces: their names are written above them
 const MARGIN = 6; // cm round the pieces when they are framed
@@ -140,7 +143,7 @@ function shownPieces(pattern: Pattern) {
  * of a drag under way are shared (`live`), whichever side it happens on.
  * Memoised: the studio re-renders with the simulation progress, the editor need not.
  */
-export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onCommit, clasps, onClasps, belts, onBelts, free, onFree, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
+export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onHighlight, onCommit, clasps, onClasps, belts, onBelts, free, onFree, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
   const liveRef = useRef<PatternEdits | null>(null);
   const shown = live ?? edits;
   const pattern = useMemo(() => garment.draft(measures, params, shown), [garment, measures, params, shown]);
@@ -492,12 +495,17 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   const s = view?.s ?? 1;
   const px = (v: number) => v / s; // screen pixels → cm
   const highlighted = useMemo(() => {
-    if (!hoverSeam) return new Set<string>();
+    if (!hoverSeam) return NO_HIGHLIGHT;
     const out = new Set<string>();
     for (const seam of pattern.seams)
       if (seam.id.replace(/[+-]$/, "") === hoverSeam) for (const sd of [seam.a, seam.b]) out.add(`${sd.piece}/${sd.edge}`);
     return out;
   }, [hoverSeam, pattern]);
+  // The same edges on the garment in 3D, as long as the seam is pointed at (and the editor is there).
+  useEffect(() => {
+    onHighlight(highlighted);
+    return () => onHighlight(NO_HIGHLIGHT);
+  }, [highlighted, onHighlight]);
   const badPieces = new Set(issues.map((i) => i.piece));
   const editCount = Object.keys(edits).length;
   const dragged = dragging && dragging !== "pan" ? dragging : null;

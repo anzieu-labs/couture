@@ -342,6 +342,9 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   qu'il faut pour être les plus grandes possible dans la place disponible : l'une au-dessus de
   l'autre dans un panneau haut, côte à côte dans un panneau large (avant : une seule rangée,
   une bande au milieu d'un panneau vide).
+  Une couture survolée dans la liste « Coutures » de l'éditeur 2D est aussi mise en évidence
+  sur le vêtement en 3D (`PatternOverlay.setHighlight`) : ses bords redessinés deux fois plus
+  épais dans la couleur de la couture, les autres lignes du patron atténuées.
   Le panneau de gauche (« Atelier ») se replie comme l'assistant (flèche dans son en-tête, bouton
   « Atelier » sur la vue 3D pour le rouvrir ; ordinateur seulement, sur téléphone il est la page
   sous la vue) : la vue 3D prend la place, les réglages et l'onglet ouvert sont gardés.

@@ -469,6 +469,11 @@ export class GarmentViewer {
     this.overlay.setFocus(key);
   }
 
+  /** Highlights edges of the pattern on the garment (`piece/edge`: those of the seam pointed at in the 2D editor's list). */
+  setPatternHighlight(edges: ReadonlySet<string>) {
+    this.overlay.setHighlight(edges);
+  }
+
   /** The new garment on screen, for the overlay: drawn on it once it has fallen into its drape. */
   private overlayGarment(g: GarmentGeometry) {
     this.overlay.hold(true);
