@@ -15,6 +15,7 @@ import { patternIssues } from "@/lib/pattern/validate";
 import type { Textile } from "@/lib/textiles/catalog";
 import type { GarmentViewer } from "@/lib/viewer/GarmentViewer";
 import { useLibrary } from "./useLibrary";
+import { fetchShared, useSharedLibrary } from "./useSharedLibrary";
 
 const DRESS_DELAY = 250;
 const HISTORY = 100;
@@ -105,8 +106,12 @@ export function useGarment(
   // The saved pattern (hooks/useLibrary.ts) the drawing is: `own`, the one it is saved to as it
   // changes; else a copy of it being worn, whose first change is saved as a variant.
   const library = useLibrary();
-  const [entry, setEntry] = useState<{ id: string; own: boolean } | null>(null);
-  const saved = entry ? library.patterns.find((p) => p.id === entry.id) : undefined;
+  // `shared`: the pattern is of the shared library (lib/library/store.ts, the same for every visitor and never
+  // changed from here) — worn as a copy, as it was drawn.
+  type Kept = { name: string; note: string; free: FreePattern; clasps: readonly Clasp[]; belts: readonly Belt[] };
+  const [entry, setEntry] = useState<{ id: string; own: boolean; shared?: Kept } | null>(null);
+  const saved: Kept | undefined = entry?.shared ?? (entry ? library.patterns.find((p) => p.id === entry.id) : undefined);
+  const sharedLibrary = useSharedLibrary();
   const { drawingClasps, drawingBelts } = history;
   const { add: saveNew, update: saveOver } = library;
   useEffect(() => {
@@ -163,6 +168,9 @@ export function useGarment(
   const [sewn, setSewn] = useState(pattern);
   if (pattern !== sewn && issues.length === 0) setSewn(pattern);
 
+  // The same garment sewn and draped again from the start, when asked (the count of the times it was).
+  const [stitching, setStitching] = useState(0);
+  const resew = useCallback(() => setStitching((n) => n + 1), []);
   // Only the mechanical properties matter here: re-sew on textile changes, not colours.
   const { weight, bending, stretch, thickness, friction } = textile;
   useEffect(() => {
@@ -179,7 +187,7 @@ export function useGarment(
       });
     }, DRESS_DELAY);
     return () => clearTimeout(timer);
-  }, [ready, sewn, weight, bending, stretch, thickness, friction, viewerRef]);
+  }, [ready, sewn, weight, bending, stretch, thickness, friction, viewerRef, stitching]);
 
   /**
    * A new drawing, and the garment worn becomes it: from simple shapes, or as a copy of the
@@ -229,10 +237,26 @@ export function useGarment(
     const drawn = await askPattern({ description, measures });
     const clasps = drawn.clasps ?? [], belts = drawn.belts ?? [];
     history.restart(FREE, { edits: NO_EDITS, clasps, belts, free: drawn.free });
-    // A new model: kept in the library, to be worn again.
-    setEntry({ id: saveNew({ name: drawn.name, note: drawn.note, free: drawn.free, clasps, belts }), own: true });
+    keep(drawn, { name: drawn.name, note: drawn.note, free: drawn.free, clasps, belts });
     setKind(FREE);
     return drawn;
+  };
+  /**
+   * A model just drawn, kept to be worn again: in the shared library when the server put it
+   * there (for everyone; a copy of it is worn), else in the visitor's own.
+   */
+  const keep = (drawn: DescribedPattern, kept: Kept) => {
+    if (!drawn.shared) return setEntry({ id: saveNew({ ...kept, clasps: kept.clasps as Clasp[], belts: kept.belts as Belt[] }), own: true });
+    setEntry({ id: drawn.shared.id, own: false, shared: { ...kept, name: drawn.shared.name } });
+    void sharedLibrary.refresh();
+  };
+  /** A pattern of the shared library worn: a copy of it, fetched from the server. */
+  const wearShared = async (id: string) => {
+    const kept = await fetchShared(id);
+    history.restart(FREE, { edits: NO_EDITS, clasps: kept.clasps, belts: kept.belts, free: kept.free });
+    setEntry({ id, own: false, shared: kept });
+    setKind(FREE);
+    return { name: kept.name, note: kept.note, pieces: kept.free.pieces.map((p) => p.name) };
   };
   /** A pattern of the library worn: a copy of it (`own`: the pattern itself, taken up where it was left). */
   const wearSaved = (id: string, own = false) => {
@@ -252,9 +276,9 @@ export function useGarment(
   // a drawing — its own when it is one (a step to undo), a copy of it when it is of the catalogue.
   type Worn = { free: FreePattern; clasps: readonly Clasp[]; belts: readonly Belt[]; own: boolean; name: string };
   /** A model to start from, told by its id: a saved pattern of the library, or a garment of the catalogue as it is set — as a drawing, whatever is being worn. */
-  const modelDrawing = (id: string): Worn | null => {
+  const modelDrawing = async (id: string): Promise<Worn | null> => {
     if (!measures) throw new Error("Le mannequin n'est pas encore prêt.");
-    const kept = library.patterns.find((p) => p.id === id);
+    const kept = library.patterns.find((p) => p.id === id) ?? (sharedLibrary.patterns.some((p) => p.id === id) ? await fetchShared(id) : undefined);
     if (kept) return { free: kept.free, clasps: kept.clasps, belts: kept.belts, own: false, name: `${kept.name} · variante` };
     const def = GARMENTS.find((g) => g.id === id);
     if (!def) return null;
@@ -322,8 +346,11 @@ export function useGarment(
    */
   const reshape = async (change: string, from?: string): Promise<DescribedPattern> => {
     // `from`: another model than the garment worn to start from (modelDrawing) — the result is then a new pattern of the library.
-    const worn = (from !== undefined && modelDrawing(from)) || wornDrawing();
-    const drawn = await askPattern({ description: change, measures, base: sketchOf(worn.free, worn.belts, worn.clasps, worn.name, "") });
+    const worn = (from !== undefined && (await modelDrawing(from))) || wornDrawing();
+    // Drawn from another model or from a garment of the catalogue, it is a garment of its own (`asNew`: the
+    // server keeps it in the shared library); a drawing being worked on is retouched as it is.
+    const fresh = from !== undefined || !worn.own;
+    const drawn = await askPattern({ description: change, measures, base: sketchOf(worn.free, worn.belts, worn.clasps, worn.name, ""), ...(fresh && { asNew: true }) });
     const kept = new Set(drawn.unchanged ?? []);
     const sides = (s: FreePattern["seams"][number]) => [`${s.a.piece}/${s.a.edge}`, `${s.b.piece}/${s.b.edge}`].sort().join(" ");
     const sewn = new Map(worn.free.seams.map((s) => [sides(s), s.reverse]));
@@ -332,8 +359,16 @@ export function useGarment(
       pieces: drawn.free.pieces.map((p) => (kept.has(p.id) && worn.free.pieces.find((w) => w.id === p.id)) || p),
       seams: drawn.free.seams.map((s) => (kept.has(s.a.piece) && kept.has(s.b.piece) && sewn.has(sides(s)) ? { ...s, reverse: sewn.get(sides(s))! } : s)),
     };
+    if (fresh && drawn.shared) {
+      // A new model in the shared library: worn as such.
+      const clasps = drawn.clasps ?? [], belts = drawn.belts ?? [];
+      history.restart(FREE, { edits: NO_EDITS, clasps, belts, free });
+      keep(drawn, { name: drawn.name, note: drawn.note, free, clasps, belts });
+      setKind(FREE);
+      return { ...drawn, free };
+    }
     // Started from another model: a garment of its own, under the name the pattern maker gave it.
-    putOn(from !== undefined && drawn.name ? { ...worn, name: drawn.name } : worn, free, drawn.clasps ?? NO_CLASPS, drawn.belts ?? NO_BELTS, drawn.note);
+    putOn(fresh && drawn.name ? { ...worn, name: drawn.name } : worn, free, drawn.clasps ?? NO_CLASPS, drawn.belts ?? NO_BELTS, drawn.note);
     return { ...drawn, free };
   };
   /**
@@ -374,8 +409,10 @@ export function useGarment(
       setAllParams((a) => ({ ...a, ...kept }));
     }
     if (GARMENTS.some((g) => g.id === id)) setKind(id as string);
-    // The saved pattern that was being worn, taken up where it was left.
-    if (typeof savedId === "string" && library.patterns.some((p) => p.id === savedId)) wearSaved(savedId, true);
+    // The saved pattern that was being worn, taken up where it was left; one of the shared library, as it is there.
+    if (typeof savedId !== "string") return;
+    if (library.patterns.some((p) => p.id === savedId)) wearSaved(savedId, true);
+    else void wearShared(savedId).catch(() => {});
   };
   const { commit: commitEdits, commitFree } = history;
   // A drawn pattern has no edits: the points moved are moved in the drawing.
@@ -402,6 +439,7 @@ export function useGarment(
     importFree,
     describeFree,
     wear,
+    resew,
     removePieces,
     reshape,
     /** The library of saved patterns, the one being worn (null: none), and how to wear or forget one. */
@@ -409,8 +447,11 @@ export function useGarment(
     savedId: kind === FREE ? (entry?.id ?? null) : null,
     wearSaved,
     forgetSaved,
-    /** Whether an id is a model one can start from: a saved pattern or a garment of the catalogue. */
-    isModel: (id: string) => library.patterns.some((p) => p.id === id) || GARMENTS.some((g) => g.id === id),
+    /** The shared library (the same for every visitor), and how to wear one of its patterns. */
+    shared: sharedLibrary.patterns,
+    wearShared,
+    /** Whether an id is a model one can start from: a pattern of either library or a garment of the catalogue. */
+    isModel: (id: string) => library.patterns.some((p) => p.id === id) || sharedLibrary.patterns.some((p) => p.id === id) || GARMENTS.some((g) => g.id === id),
     addClasp,
     addBelt,
     removeAccessories,

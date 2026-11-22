@@ -270,6 +270,34 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   d'un logiciel du commerce n'a été essayé, seulement nos exports et des fichiers écrits à la main.
   *À faire* : proposer des coutures d'après les longueurs de bords et les crans ; export du
   patron libre vers ces mêmes formats (il passe déjà par l'export existant).
+- [x] **Bibliothèque commune, sur Neon** (2026-11-22, `lib/library/store.ts`, `app/api/library`,
+  `neon.ts`, `db/schema.sql`) : les modèles que l'assistant dessine sont disponibles pour tous
+  les visiteurs, et plus seulement dans le navigateur de celui qui les a demandés. Projet Neon
+  `couture` (lié par `neon init`, fichier `.neon` ignoré par git) : une table `patterns`
+  (Lakebase Postgres : nom, note, vignette, clé du dessin) et un bucket privé `patterns`
+  (Object Storage : le dessin, un document JSON par patron), sur la même branche. Le serveur est
+  le seul à écrire : la route de dessin `/api/pattern` y range un patron quand c'est un nouveau
+  modèle (dessiné à neuf, d'après un autre modèle, ou d'après un vêtement du catalogue) et qu'il
+  se coud sans défaut ; `GET /api/library` les liste, `GET /api/library/<id>` rend un dessin.
+  Rien ne se modifie ni ne se supprime depuis l'app (choix du 2026-11-22 : « personne »).
+  Pilotes, selon les consignes Neon : `pg` (node-postgres) sur l'URL avec pooler, le pool gardé
+  entre les requêtes par `attachDatabasePool` (Fluid compute de Vercel) ; Files SDK
+  (`files-sdk/neon`) pour le bucket. `npm run db:migrate` applique le schéma (connexion directe).
+  Dans l'app : section « Bibliothèque commune » du sélecteur de vêtement, cherchable ; porter
+  un patron commun en donne une copie, la retoucher fait une variante dans « Mes patrons » (le
+  navigateur) ; l'assistant connaît les 40 derniers patrons communs et repart d'eux. Sans les
+  variables Neon (déploiement non configuré), tout retombe sur la bibliothèque du navigateur.
+  Vérifié sur une branche Neon de test (`dev-library`, expire le 2026-11-29) : « un débardeur
+  court et ample » dessiné en 27 s → fiche dans Postgres, objet de 10 Ko dans le bucket, listé
+  avec sa vignette, relu identique, 404 pour un id inconnu ; dans l'app, il apparaît dans la
+  bibliothèque commune, la recherche « debardeur » le trouve, un clic le porte. La branche
+  `production` répond, vide.
+  Les variables Neon de la branche `production` sont dans le projet Vercel (environnement
+  Production : `DATABASE_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_ENDPOINT_URL_S3`, `AWS_REGION`, ajoutées le 2026-11-22) : le site en ligne partagera la
+  bibliothèque à son prochain déploiement ; les déploiements de prévisualisation, non.
+  *À faire* : modération (n'importe qui peut y ajouter en faisant dessiner) ;
+  pagination et recherche côté serveur quand elle grandira (200 listés aujourd'hui).
 - [x] **Bibliothèque de patrons** (2026-11-22, `components/hooks/useLibrary.ts`) : ce que
   l'assistant dessine est gardé — nom, note, dessin, fermoirs, ceintures — dans le
   `localStorage` du navigateur (`couture.library.v1`, 60 patrons), sans compte, et se retrouve
@@ -379,6 +407,16 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   (Debout, Marche, Assise, Accroupie), avec la cadence quand le mannequin marche (au-delà de
   155 pas/min l'option s'appelle « Course »). La pose ne se remet plus à zéro en changeant
   d'onglet.
+  Sous la vue 3D, les boutons Face / Profil / Dos / Buste sont remplacés par un seul
+  « Recoudre », qui repose le vêtement porté sur le mannequin, le recoud et le redrape (la vue
+  se tourne à la main ; l'assistant sait toujours cadrer une vue). Le bouton de rotation
+  automatique est retiré aussi (l'assistant peut encore la lancer ou l'arrêter).
+  Le sélecteur de vêtement n'est plus une fenêtre : « Changer » le fait glisser à la place du
+  panneau latéral (transition de 300 ms, Échap ou la flèche pour revenir), sur deux colonnes.
+  Le titre « Atelier » et son sous-titre sont retirés : les onglets sont en haut du panneau.
+  L'éditeur 2D fait de même : « Éditer le patron en 2D » le fait glisser à la place du panneau,
+  qui s'élargit de moitié (360 → 540 px) ; le fermer ramène le panneau. Il ne s'ouvre plus tout
+  seul en entrant dans l'onglet Patron, et n'occupe plus la moitié de la vue 3D.
   Le panneau de gauche (« Atelier ») se replie comme l'assistant (flèche dans son en-tête, bouton
   « Atelier » sur la vue 3D pour le rouvrir ; ordinateur seulement, sur téléphone il est la page
   sous la vue) : la vue 3D prend la place, les réglages et l'onglet ouvert sont gardés.

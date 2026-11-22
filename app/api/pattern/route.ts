@@ -1,6 +1,7 @@
 import { generateText, Output, type ModelMessage } from "ai";
 import { z } from "zod";
 import { changePrompt, DESCRIPTION_MAX, describePrompt, readSketch, retryPrompt, unchangedPieces, ZONE_IDS, type Sketch } from "@/lib/pattern/describe";
+import { addShared, libraryConfigured } from "@/lib/library/store";
 import type { FreePattern } from "@/lib/pattern/free";
 import type { Belt, BodyMeasures, Clasp } from "@/lib/pattern/types";
 
@@ -69,6 +70,8 @@ export interface DescribedPattern {
   issues: string[];
   /** When a pattern was changed (`base`): the ids of its pieces that came back as they were. */
   unchanged?: string[];
+  /** The pattern as it was added to the shared library (lib/library/store.ts): a new model, drawn without a fault. */
+  shared?: { id: string; name: string };
 }
 
 /** How much of a pattern to change the route reads (characters of JSON): a garment's pieces, not a file. */
@@ -92,7 +95,8 @@ function statusOf(error: unknown): number | undefined {
 
 export async function POST(request: Request) {
   const body: unknown = await request.json().catch(() => null);
-  const { description, measures, base: told } = (body ?? {}) as { description?: unknown; measures?: unknown; base?: unknown };
+  // `asNew`: the change made to `base` is a garment of its own (drawn from a model of the same kind), not a retouch of the one worn.
+  const { description, measures, base: told, asNew } = (body ?? {}) as { description?: unknown; measures?: unknown; base?: unknown; asNew?: unknown };
   const m = readMeasures(measures);
   if (typeof description !== "string" || !description.trim() || description.length > DESCRIPTION_MAX || !m)
     return refuse(400, `Décrivez le vêtement en quelques mots (${DESCRIPTION_MAX} caractères au plus).`);
@@ -116,8 +120,19 @@ export async function POST(request: Request) {
     }
     if (!answer?.read.usable) return refuse(422, "Le patron dessiné n'a pas pu être cousu. Reformulez la description, ou partez de formes simples.");
     const { sketch, read } = answer;
+    // A new model, drawn without a fault, is kept for everyone in the shared library; a retouch
+    // of the garment worn, or a pattern left with something to put right, stays the visitor's.
+    let shared: DescribedPattern["shared"];
+    if ((!base || asNew === true) && !read.issues.length && libraryConfigured()) {
+      try {
+        const kept = await addShared(sketch.name, sketch.note, { free: read.free, clasps: read.clasps, belts: read.belts });
+        shared = { id: kept.id, name: kept.name };
+      } catch (e) {
+        console.error("pattern from description: not added to the shared library:", e);
+      }
+    }
     console.info(`pattern from description: ${MODEL}, ${attempts} answer(s), ${tokens} tokens, ${((Date.now() - started) / 1000).toFixed(0)} s, ${read.issues.length} issue(s) left`);
-    return Response.json({ name: sketch.name.trim(), note: sketch.note.trim(), free: read.free, belts: read.belts, clasps: read.clasps, issues: read.issues, ...(base && { unchanged: unchangedPieces(base.data, sketch) }) } satisfies DescribedPattern);
+    return Response.json({ name: sketch.name.trim(), note: sketch.note.trim(), free: read.free, belts: read.belts, clasps: read.clasps, issues: read.issues, ...(base && { unchanged: unchangedPieces(base.data, sketch) }), ...(shared && { shared }) } satisfies DescribedPattern);
   } catch (e) {
     console.error("pattern from description:", e);
     // What the gateway refuses for a reason the user can do something about (or wait for).

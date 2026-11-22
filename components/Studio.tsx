@@ -9,6 +9,7 @@ import { constrain, withDelta } from "@/lib/pattern/edit";
 import type { ExportOptions } from "@/lib/pattern/export";
 import { DEFAULT_ALLOWANCES } from "@/lib/pattern/markings";
 import { GARMENTS } from "@/lib/pattern/garments";
+import type { DxfImport } from "@/lib/pattern/import/dxf";
 import type { PatternEdits } from "@/lib/pattern/types";
 import { CUSTOM_TEXTILE, customTextile, drapeOf, TEXTILE_FIELDS, TEXTILES, withLook, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
@@ -16,6 +17,7 @@ import type { FitMode } from "@/lib/viewer/fitMap";
 import type { ViewPreset } from "@/lib/viewer/GarmentViewer";
 import { AssistantPanel } from "./AssistantPanel";
 import { FitLegend } from "./FitLegend";
+import { GarmentPicker } from "./GarmentPicker";
 import { useAssistant, type AssistantHandlers } from "./hooks/useAssistant";
 import { FREE, useGarment } from "./hooks/useGarment";
 import { useLocalSpans } from "./hooks/useLocalSpans";
@@ -34,13 +36,6 @@ const TABS: [Tab, string][] = [
   ["morpho", "Morphologie"],
   ["patron", "Patron"],
   ["tissu", "Tissu"],
-];
-
-const VIEW_LABELS: { id: ViewPreset; label: string }[] = [
-  { id: "face", label: "Face" },
-  { id: "profil", label: "Profil" },
-  { id: "dos", label: "Dos" },
-  { id: "buste", label: "Buste" },
 ];
 
 const PRESETS = { Homme: MALE, Femme: FEMALE };
@@ -97,21 +92,17 @@ export default function Studio() {
   const ready = status === "ready";
 
   const [tab, setTab] = useState<Tab>("morpho");
-  const [view, setView] = useState<ViewPreset>("face");
   const [autoRotate, setAutoRotate] = useState(false);
   const [walking, setWalking] = useState(false);
   const [cadence, setCadence] = useState(CADENCE.default);
   const [posture, setPosture] = useState<Posture>("standing");
   const [fitMode, setFitMode] = useState<FitMode | null>(null);
   const [cutting, setCutting] = useState<ExportOptions>({ allowances: DEFAULT_ALLOWANCES, fold: true });
-  // The 2D pattern editor belongs to the pattern tab: opened on entering it, closed on leaving it
-  // (it may be closed while there — on a phone it covers the 3D view).
+  // The 2D pattern editor takes the place of the side panel, made half as wide again, while the
+  // pattern is edited (asked from the pattern tab, or when a pattern of one's own is started).
   const [editorOpen, setEditorOpen] = useState(false);
   const closeEditor = useCallback(() => setEditorOpen(false), []);
-  const selectTab = (id: Tab) => {
-    setTab(id);
-    setEditorOpen(id === "patron");
-  };
+  const selectTab = (id: Tab) => setTab(id);
   // The pose is chosen on the 3D view itself, whatever the tab: a held posture stops the walk, and walking stands the mannequin up.
   const pose: Pose = walking ? "walking" : posture;
   const choosePose = (next: Pose) => {
@@ -169,6 +160,8 @@ export default function Studio() {
   // The edge of the pattern pointed at on the garment in 3D: shown on the 2D pattern too.
   const [edge3d, setEdge3d] = useState<string | null>(null);
   const overlay = editorOpen && !!garment.measures;
+  // The editor is shown (it needs the body's measures): in the side panel, in place of the tabs.
+  const editing = overlay;
   const { pattern: drafted, edits } = garment;
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -205,10 +198,8 @@ export default function Studio() {
   const highlightOnGarment = useCallback((edges: ReadonlySet<string>) => viewerRef.current?.setPatternHighlight(edges), [viewerRef]);
 
 
-  const goTo = (v: ViewPreset) => {
-    setView(v);
-    viewerRef.current?.goTo(v);
-  };
+  // The camera's preset views have no buttons (the view is turned by hand): the assistant still aims it.
+  const goTo = (v: ViewPreset) => viewerRef.current?.goTo(v);
 
   // ---- Memory (MEMORY): written a moment after a change, read back once the page is there
   // (after its first render: the server knows nothing of this browser's storage).
@@ -265,6 +256,10 @@ export default function Studio() {
   const [assistantOpen, setAssistantOpen] = useState<boolean | null>(null);
   // The workshop's own panel, on the left, folds away the same way to leave the room to the 3D view (desktop: on a phone it is the page under the view).
   const [panelOpen, setPanelOpen] = useState(true);
+  // The garment picker takes the place of the panel while a garment is chosen; what the last DXF import read is told in the pattern tab afterwards.
+  const [picking, setPicking] = useState(false);
+  const closePicker = useCallback(() => setPicking(false), []);
+  const [imported, setImported] = useState<DxfImport | null>(null);
   // What a tool reads back once the body has settled: the measurements of then, not of the render it was called in.
   const latest = useRef({ measurements: body.measurements, saturated: body.saturated, targets: body.targets, textileId });
   useEffect(() => {
@@ -349,10 +344,21 @@ export default function Studio() {
       // A model of the same kind exists (the assistant's choice, lib/assistant/tools.ts): it is adjusted, not drawn again.
       const from = i.startFrom && garment.isModel(i.startFrom) ? i.startFrom : null;
       const drawn = from ? await garment.reshape(i.description, from) : await garment.describeFree(i.description);
-      const startedFrom = from ? (garment.saved.find((p) => p.id === from)?.name ?? GARMENTS.find((g) => g.id === from)?.name) : undefined;
-      return { name: drawn.name, note: drawn.note, pieces: drawn.free.pieces.length, seams: drawn.free.seams.length, stillWrong: drawn.issues, savedToLibrary: true, ...(startedFrom && { startedFrom }) };
+      const startedFrom = from ? (garment.saved.find((p) => p.id === from)?.name ?? garment.shared.find((p) => p.id === from)?.name ?? GARMENTS.find((g) => g.id === from)?.name) : undefined;
+      return {
+        name: drawn.shared?.name ?? drawn.name,
+        note: drawn.note,
+        pieces: drawn.free.pieces.length,
+        seams: drawn.free.seams.length,
+        stillWrong: drawn.issues,
+        savedTo: drawn.shared ? "the shared library, for every visitor" : "the user's own patterns, in this browser",
+        ...(startedFrom && { startedFrom }),
+      };
     },
-    wearSaved: (i) => ({ ...garment.wearSaved(i.id), note: "une copie de ce patron est portée : la retoucher l'enregistre comme variante" }),
+    wearSaved: async (i) => ({
+      ...(garment.saved.some((p) => p.id === i.id) ? garment.wearSaved(i.id) : await garment.wearShared(i.id)),
+      note: "une copie de ce patron est portée : la retoucher l'enregistre comme variante",
+    }),
     removePieces: (i) => ({ ...garment.removePieces(i.pieces), note: "le vêtement est maintenant un patron dessiné ; « Annuler » de l'éditeur 2D revient en arrière s'il l'était déjà" }),
     reshapeGarment: async (i) => {
       const drawn = await garment.reshape(i.change);
@@ -412,7 +418,8 @@ export default function Studio() {
         clasps: garment.clasps.map((c) => ({ a: `${c.a.piece}/${c.a.edge} t=${round(c.a.t, 2)}`, b: `${c.b.piece}/${c.b.edge} t=${round(c.b.t, 2)}` })),
         belts: garment.belts.map((b) => ({ edge: `${b.piece}/${b.edge}`, stretch: b.stretch })),
       },
-      library: garment.saved.slice(0, 40).map((p) => ({ id: p.id, name: p.name, note: p.note.slice(0, 120), ...(p.id === garment.savedId && { worn: true }) })),
+      // The visitor's own patterns, then the shared library's latest.
+      library: [...garment.saved.slice(0, 20), ...garment.shared.slice(0, 40)].map((p) => ({ id: p.id, name: p.name, note: p.note.slice(0, 120), ...(p.id === garment.savedId && { worn: true }) })),
       draping: simProgress > 0 && simProgress < 1,
     };
   };
@@ -422,37 +429,6 @@ export default function Studio() {
     <main className="flex h-dvh w-full flex-col overflow-hidden bg-canvas text-ink md:flex-row">
       {/* ------------------------------------------------------------ 3D */}
       <section className="relative flex h-[58dvh] shrink-0 md:h-full md:flex-1" aria-label="Aperçu 3D">
-        {editorOpen && garment.measures && (
-          // Desktop: on the right of the 3D view (which follows the edits live); mobile: over it.
-          <div className="absolute inset-0 z-20 md:static md:z-auto md:order-last md:w-1/2 md:shrink-0 md:border-l md:border-line">
-            <PatternEditor
-              key={garment.kind}
-              garment={garment.garment}
-              measures={garment.measures}
-              params={garment.params}
-              edits={garment.edits}
-              live={live}
-              onLive={setLive}
-              focusKey={focus3d}
-              onFocus={focusOnGarment}
-              onHighlight={highlightOnGarment}
-              hoverEdge={edge3d}
-              onCommit={garment.commit}
-              clasps={garment.clasps}
-              onClasps={garment.commitClasps}
-              belts={garment.belts}
-              onBelts={garment.commitBelts}
-              free={garment.free}
-              onFree={garment.setFree}
-              onUndo={garment.undo}
-              onRedo={garment.redo}
-              canUndo={garment.canUndo}
-              canRedo={garment.canRedo}
-              allowances={cutting.allowances}
-              onClose={closeEditor}
-            />
-          </div>
-        )}
         <div className="relative min-w-0 flex-1">
           <div ref={viewportRef} className="absolute inset-0" />
 
@@ -538,30 +514,14 @@ export default function Studio() {
 
           <div className="absolute inset-x-0 bottom-4 flex flex-col items-center gap-2 px-4 md:bottom-6">
             <div className="flex items-center gap-1 rounded-full border border-line bg-white/80 p-1 shadow-sm backdrop-blur">
-              {VIEW_LABELS.map((v) => (
-                <button
-                  key={v.id}
-                  type="button"
-                  onClick={() => goTo(v.id)}
-                  aria-pressed={view === v.id}
-                  className="rounded-full px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-ink aria-pressed:bg-ink aria-pressed:text-white"
-                >
-                  {v.label}
-                </button>
-              ))}
-              <span className="mx-1 h-4 w-px bg-line" aria-hidden />
               <button
                 type="button"
-                onClick={() => setAutoRotate((a) => !a)}
-                aria-pressed={autoRotate}
-                aria-label="Rotation automatique"
-                title="Rotation automatique"
-                className="grid size-7 place-items-center rounded-full text-muted transition-colors hover:text-ink aria-pressed:bg-ink aria-pressed:text-white"
+                onClick={garment.resew}
+                disabled={!garment.pattern}
+                title="Recommencer la couture : le vêtement est posé à nouveau sur le mannequin, cousu et drapé"
+                className="rounded-full px-3.5 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-ink hover:text-white disabled:opacity-40"
               >
-                <svg viewBox="0 0 20 20" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-                  <path d="M16.5 10a6.5 6.5 0 1 1-2-4.7" strokeLinecap="round" />
-                  <path d="M15 2.5v3.3h-3.3" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+                Recoudre
               </button>
             </div>
           </div>
@@ -570,108 +530,166 @@ export default function Studio() {
 
       {/* --------------------------------------------------------- Panel */}
       {/* Desktop: the panel on the left, the 3D view then the 2D pattern on its right; mobile: under the 3D view. */}
-      <aside className={`flex min-h-0 flex-1 flex-col border-line bg-panel md:order-first md:h-full md:w-[360px] md:flex-none md:border-r ${panelOpen ? "" : "md:hidden"}`} aria-label="Atelier">
-        <header className="border-b border-line px-5 pt-4 md:pt-5">
-          <div className="flex items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <h1 className="text-lg font-semibold tracking-tight">Atelier</h1>
-              <p className="truncate text-xs text-muted">{garment.garment.name} · mannequin paramétrique</p>
+      <aside
+        className={`flex min-h-0 flex-1 flex-col border-line bg-panel md:order-first md:h-full md:flex-none md:border-r md:transition-[width] md:duration-300 md:ease-out ${editing ? "md:w-[540px]" : "md:w-[360px]"} ${panelOpen ? "" : "md:hidden"}`}
+        aria-label="Atelier"
+      >
+        {/* The panel and, in its place, the garment picker while a garment is chosen or the 2D editor while the pattern is edited: one slides out as the other slides in. */}
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          <div className={`flex h-full flex-col transition-[transform,opacity] duration-300 ease-out ${picking || editing ? "pointer-events-none -translate-x-8 opacity-0" : ""}`} inert={picking || editing}>
+          <header className="flex items-end gap-2 border-b border-line px-5 pt-3 md:pt-4">
+            <h1 className="sr-only">Atelier</h1>
+            <div role="tablist" className="flex min-w-0 flex-1 gap-5">
+              {TABS.map(([id, label]) => (
+                <button
+                  key={id}
+                  role="tab"
+                  type="button"
+                  aria-selected={tab === id}
+                  onClick={() => selectTab(id)}
+                  className="-mb-px border-b-2 border-transparent pb-2.5 text-sm font-medium text-muted transition-colors hover:text-ink aria-selected:border-ink aria-selected:text-ink"
+                >
+                  {label}
+                </button>
+              ))}
             </div>
             <button
               type="button"
               onClick={() => setPanelOpen(false)}
               aria-label="Replier l'atelier"
               title="Replier"
-              className="hidden size-7 shrink-0 place-items-center rounded-full border border-line text-muted transition-colors hover:border-ink hover:text-ink md:grid"
+              className="mb-2 hidden size-7 shrink-0 place-items-center rounded-full border border-line text-muted transition-colors hover:border-ink hover:text-ink md:grid"
             >
               <svg viewBox="0 0 20 20" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
                 <path d="M12 5l-5 5 5 5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
-          </div>
-          <div role="tablist" className="mt-3 flex gap-5">
-            {TABS.map(([id, label]) => (
-              <button
-                key={id}
-                role="tab"
-                type="button"
-                aria-selected={tab === id}
-                onClick={() => selectTab(id)}
-                className="-mb-px border-b-2 border-transparent pb-2.5 text-sm font-medium text-muted transition-colors hover:text-ink aria-selected:border-ink aria-selected:text-ink"
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </header>
+          </header>
 
-        <div className="flex-1 space-y-7 overflow-y-auto px-5 py-5" role="tabpanel">
-          {tab === "morpho" && (
-            <MorphologyPanel
-              value={body.morph}
-              onChange={body.setMorph}
-              measurements={body.measurements}
-              presets={PRESETS}
-              onPreset={body.reset}
-              targets={body.targets}
-              onTargets={body.setTargets}
-              saturated={body.saturated}
-              fitting={body.fitting}
-              showLocal={showLocal}
-              onShowLocal={setShowLocal}
-              localTapes={local.tapes}
-              localSpans={local.spans}
-            />
-          )}
-          {tab === "patron" && (
-            <PatternPanel
-              pattern={garment.pattern}
-              params={garment.params}
-              onParams={garment.setParams}
-              garment={garment.garment}
-              onGarment={garment.setKind}
+          <div className="flex-1 space-y-7 overflow-y-auto px-5 py-5" role="tabpanel">
+            {tab === "morpho" && (
+              <MorphologyPanel
+                value={body.morph}
+                onChange={body.setMorph}
+                measurements={body.measurements}
+                presets={PRESETS}
+                onPreset={body.reset}
+                targets={body.targets}
+                onTargets={body.setTargets}
+                saturated={body.saturated}
+                fitting={body.fitting}
+                showLocal={showLocal}
+                onShowLocal={setShowLocal}
+                localTapes={local.tapes}
+                localSpans={local.spans}
+              />
+            )}
+            {tab === "patron" && (
+              <PatternPanel
+                pattern={garment.pattern}
+                params={garment.params}
+                onParams={garment.setParams}
+                garment={garment.garment}
+                onPick={() => setPicking(true)}
+                imported={imported}
+                onDismissImported={() => setImported(null)}
+                measures={garment.measures}
+                progress={simProgress}
+                cutting={cutting}
+                onCutting={setCutting}
+                editorOpen={editorOpen}
+                onEditor={setEditorOpen}
+                editCount={Object.keys(garment.edits).length}
+                onResetEdits={() => garment.commit({})}
+                issues={garment.issues.map((i) => i.message)}
+              />
+            )}
+            {tab === "tissu" && (
+              <TextilePanel
+                textile={textile}
+                textiles={textiles}
+                onTextile={setTextileId}
+                onCustom={setCustom}
+                colors={colors}
+                colorsById={colorsById}
+                onColor={(key, hex) => setColorsById((prev) => ({ ...prev, [textileId]: { ...prev[textileId], [key]: hex } }))}
+              />
+            )}
+          </div>
+
+          <footer className="border-t border-line px-5 py-3 text-[11px] leading-relaxed text-muted">
+            Corps : modèle Anny (NAVER LABS Europe, Apache 2.0) issu de MakeHuman (CC0).
+          </footer>
+          </div>
+          <div className={`absolute inset-0 transition-[transform,opacity] duration-300 ease-out ${picking ? "" : "pointer-events-none translate-x-8 opacity-0"}`} inert={!picking}>
+            <GarmentPicker
+              open={picking}
+              current={garment.garment.id}
+              onSelect={(kind) => {
+                garment.setKind(kind);
+                setPicking(false);
+              }}
               onDraw={(source) => {
                 garment.startFree(source);
+                setImported(null);
                 setEditorOpen(true);
+                setPicking(false);
               }}
               onImport={(text, units) => {
-                const read = garment.importFree(text, units);
+                setImported(garment.importFree(text, units));
                 setEditorOpen(true);
-                return read;
+                setPicking(false);
+              }}
+              shared={garment.shared}
+              onWearShared={(id) => {
+                void garment.wearShared(id).catch(() => {});
+                setImported(null);
+                setPicking(false);
               }}
               saved={garment.saved}
               savedId={garment.savedId}
-              onWearSaved={(id) => void garment.wearSaved(id)}
+              onWearSaved={(id) => {
+                garment.wearSaved(id);
+                setImported(null);
+                setPicking(false);
+              }}
               onForgetSaved={garment.forgetSaved}
               hasDrawing={garment.hasDrawing}
               canCopy={garment.canCopy}
-              measures={garment.measures}
-              progress={simProgress}
-              cutting={cutting}
-              onCutting={setCutting}
-              editorOpen={editorOpen}
-              onEditor={setEditorOpen}
-              editCount={Object.keys(garment.edits).length}
-              onResetEdits={() => garment.commit({})}
-              issues={garment.issues.map((i) => i.message)}
+              onClose={closePicker}
             />
-          )}
-          {tab === "tissu" && (
-            <TextilePanel
-              textile={textile}
-              textiles={textiles}
-              onTextile={setTextileId}
-              onCustom={setCustom}
-              colors={colors}
-              colorsById={colorsById}
-              onColor={(key, hex) => setColorsById((prev) => ({ ...prev, [textileId]: { ...prev[textileId], [key]: hex } }))}
-            />
-          )}
+          </div>
+          <div className={`absolute inset-0 bg-panel transition-[transform,opacity] duration-300 ease-out ${editing && !picking ? "" : "pointer-events-none translate-x-8 opacity-0"}`} inert={!editing || picking}>
+            {editing && garment.measures && (
+              <PatternEditor
+                key={garment.kind}
+                garment={garment.garment}
+                measures={garment.measures}
+                params={garment.params}
+                edits={garment.edits}
+                live={live}
+                onLive={setLive}
+                focusKey={focus3d}
+                onFocus={focusOnGarment}
+                onHighlight={highlightOnGarment}
+                hoverEdge={edge3d}
+                onCommit={garment.commit}
+                clasps={garment.clasps}
+                onClasps={garment.commitClasps}
+                belts={garment.belts}
+                onBelts={garment.commitBelts}
+                free={garment.free}
+                onFree={garment.setFree}
+                onUndo={garment.undo}
+                onRedo={garment.redo}
+                canUndo={garment.canUndo}
+                canRedo={garment.canRedo}
+                allowances={cutting.allowances}
+                onClose={closeEditor}
+              />
+            )}
+          </div>
         </div>
-
-        <footer className="border-t border-line px-5 py-3 text-[11px] leading-relaxed text-muted">
-          Corps : modèle Anny (NAVER LABS Europe, Apache 2.0) issu de MakeHuman (CC0).
-        </footer>
       </aside>
 
       {/* ----------------------------------------------------- Assistant */}

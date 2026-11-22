@@ -6,10 +6,8 @@ import { download, exportDxf, exportPdf, exportSvg, type ExportOptions } from "@
 import { cutPieces } from "@/lib/pattern/markings";
 import { layoutRow, pieceBlock, type Prim } from "@/lib/pattern/sheet";
 import { CUT_LABELS, type GarmentDef, type GarmentParams } from "@/lib/pattern/garments";
-import type { DxfImport, DxfUnits } from "@/lib/pattern/import/dxf";
+import type { DxfImport } from "@/lib/pattern/import/dxf";
 import type { BodyMeasures, Pattern } from "@/lib/pattern/types";
-import { GarmentPicker } from "./GarmentPicker";
-import type { SavedPattern } from "./hooks/useLibrary";
 import { RangeField } from "./RangeField";
 import { seamColor, seamLegend } from "./seamColors";
 import { Section } from "./Section";
@@ -17,19 +15,11 @@ import { Section } from "./Section";
 interface Props {
   pattern: Pattern | null;
   garment: GarmentDef;
-  onGarment: (id: string) => void;
-  /** A pattern of the user's own is started (from simple shapes, or as a copy of the garment worn) and worn. */
-  onDraw: (source: "simple" | "copy") => void;
-  /** A pattern of the user's own is read from a DXF file and worn; throws when it cannot be read. */
-  onImport: (text: string, units: DxfUnits) => DxfImport;
-  /** There is a drawing already; the garment worn can be copied into one. */
-  /** The saved patterns of the library (hooks/useLibrary.ts), for the garment picker. */
-  saved: readonly SavedPattern[];
-  savedId: string | null;
-  onWearSaved: (id: string) => void;
-  onForgetSaved: (id: string) => void;
-  hasDrawing: boolean;
-  canCopy: boolean;
+  /** The garment picker is asked for (it takes the place of the panel: Studio.tsx). */
+  onPick: () => void;
+  /** What the last DXF import read, told under the garment until dismissed. */
+  imported: DxfImport | null;
+  onDismissImported: () => void;
   params: GarmentParams;
   onParams: (p: GarmentParams) => void;
   measures: BodyMeasures | null;
@@ -168,13 +158,10 @@ function ExportSection({ pattern, cutting, onCutting }: { pattern: Pattern | nul
 }
 
 export function PatternPanel({
-  pattern, garment, onGarment, onDraw, onImport, saved, savedId, onWearSaved, onForgetSaved, hasDrawing, canCopy, params, onParams, measures, progress, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
+  pattern, garment, onPick, imported, onDismissImported, params, onParams, measures, progress, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
 }: Props) {
   const simulating = progress > 0 && progress < 1;
-  const [picking, setPicking] = useState(false);
-  // What the last DXF import read, told under the garment until dismissed or until another garment is worn.
-  const [imported, setImported] = useState<{ read: DxfImport; garment: string } | null>(null);
-  const read = imported?.garment === garment.id ? imported.read : null;
+  const read = garment.id === "free" ? imported : null;
   // Pieces to cut, as printed (a piece listed twice for the simulation is one piece cut ×2).
   const pieceCount = pattern ? new Set(pattern.pieces.map((p) => p.name)).size : 0;
   return (
@@ -200,40 +187,12 @@ export function PatternPanel({
           </div>
           <button
             type="button"
-            onClick={() => setPicking(true)}
+            onClick={onPick}
             className="shrink-0 rounded-full border border-ink px-3 py-1.5 text-xs font-medium transition-colors hover:bg-ink hover:text-white"
           >
             Changer
           </button>
         </div>
-        <GarmentPicker
-          open={picking}
-          current={garment.id}
-          onSelect={(kind) => {
-            onGarment(kind);
-            setPicking(false);
-          }}
-          onDraw={(source) => {
-            onDraw(source);
-            setPicking(false);
-            setImported(null);
-          }}
-          onImport={(text, units) => {
-            setImported({ read: onImport(text, units), garment: "free" });
-            setPicking(false);
-          }}
-          saved={saved}
-          savedId={savedId}
-          onWearSaved={(id) => {
-            onWearSaved(id);
-            setPicking(false);
-            setImported(null);
-          }}
-          onForgetSaved={onForgetSaved}
-          hasDrawing={hasDrawing}
-          canCopy={canCopy}
-          onClose={() => setPicking(false)}
-        />
       </Section>
 
       {read && (
@@ -242,7 +201,7 @@ export function PatternPanel({
             <span>
               DXF importé : {read.pieces.length} pièce{read.pieces.length > 1 ? "s" : ""}
             </span>
-            <button type="button" onClick={() => setImported(null)} aria-label="Fermer" className="-mt-0.5 text-muted hover:text-ink">
+            <button type="button" onClick={onDismissImported} aria-label="Fermer" className="-mt-0.5 text-muted hover:text-ink">
               ×
             </button>
           </p>

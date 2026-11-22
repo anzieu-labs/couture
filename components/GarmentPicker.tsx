@@ -1,12 +1,11 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { draftFree, type FreePattern } from "@/lib/pattern/free";
+import { useEffect, useRef, useState } from "react";
+import type { SharedPattern } from "@/lib/library/store";
+import { thumbOf, type PatternThumb as Thumb } from "@/lib/pattern/thumb";
 import { CUT_LABELS, CUTS, garmentDef, garmentId, garmentsOf, type Cut } from "@/lib/pattern/garments";
 import type { DxfUnits } from "@/lib/pattern/import/dxf";
-import { NO_EDITS } from "@/lib/pattern/types";
-import { outline } from "@/lib/pattern/validate";
 import { searchable, type SavedPattern } from "./hooks/useLibrary";
 
 /** Thumbnail size (tools/thumbnails captures them at this ratio). */
@@ -21,7 +20,10 @@ interface Props {
   onDraw: (source: "simple" | "copy") => void;
   /** A pattern of the user's own is read from a DXF file (AAMA / ASTM); throws, with a message for the user, when it cannot be. */
   onImport: (text: string, units: DxfUnits) => void;
-  /** The user's saved patterns (hooks/useLibrary.ts: what the assistant drew for them), the one being worn, and how to wear or forget one. */
+  /** The shared library (lib/library/store.ts: what the assistant drew, for everyone) and how to wear one of its patterns. */
+  shared: readonly SharedPattern[];
+  onWearShared: (id: string) => void;
+  /** The visitor's own patterns (hooks/useLibrary.ts: their variants and retouches, in this browser), the pattern being worn (of either library), and how to wear or forget one of theirs. */
   saved: readonly SavedPattern[];
   savedId: string | null;
   onWearSaved: (id: string) => void;
@@ -36,43 +38,62 @@ interface Props {
 const DRAWING = "free";
 
 /**
- * Full-page garment picker: a grid of small cards — the catalogue is meant to grow to dozens
- * of garments — each with a picture of the garment draped on the mannequin and its name, for
- * one cut at a time; a switch in the header goes from the men's cuts to the women's. A native
- * modal dialog (focus kept inside, Escape closes); a click outside the cards closes it too.
+ * The garment picker: it takes the place of the workshop's side panel while a garment is
+ * chosen (Studio.tsx slides one over the other). A search, the cut (the men's or the women's of
+ * each garment of the catalogue), a pattern of one's own to start, then small cards — the
+ * shared library, the visitor's own patterns, the catalogue (meant to grow to dozens of
+ * garments), each with a picture and its name. Escape goes back.
  */
-/** The pieces of a drawing side by side, as they are drawn: the points of their outlines, and the room they take (cm). */
-function thumbOf(free: FreePattern) {
-  const gap = 6;
-  const pieces: { id: string; points: string }[] = [];
-  let x = 0, height = 1;
-  for (const piece of draftFree(free, NO_EDITS).pieces) {
-    const pts = outline(piece);
-    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
-    const left = Math.min(...xs), top = Math.max(...ys);
-    pieces.push({ id: piece.id, points: pts.map(([px, py]) => `${(x + px - left).toFixed(1)},${(top - py).toFixed(1)}`).join(" ") });
-    x += Math.max(...xs) - left + gap;
-    height = Math.max(height, top - Math.min(...ys));
-  }
-  return { pieces, width: Math.max(1, x - gap), height };
-}
-
-/** A saved pattern as its card shows it. */
-function PatternThumb({ pattern }: { pattern: SavedPattern }) {
-  const drawn = useMemo(() => thumbOf(pattern.free), [pattern.free]);
+/** A pattern as its card shows it: its pieces side by side, as they are drawn. */
+function PatternThumb({ thumb }: { thumb: Thumb }) {
   return (
-    <svg viewBox={`-4 -4 ${drawn.width + 8} ${drawn.height + 8}`} className="size-full p-3" preserveAspectRatio="xMidYMid meet" aria-hidden>
-      {drawn.pieces.map((piece) => (
-        <polygon key={piece.id} points={piece.points} fill="white" stroke="var(--color-ink)" strokeWidth={Math.max(drawn.width, drawn.height) / 160} strokeLinejoin="round" />
+    <svg viewBox={`-4 -4 ${thumb.width + 8} ${thumb.height + 8}`} className="size-full p-3" preserveAspectRatio="xMidYMid meet" aria-hidden>
+      {thumb.pieces.map((piece) => (
+        <polygon key={piece.id} points={piece.points} fill="white" stroke="var(--color-ink)" strokeWidth={Math.max(thumb.width, thumb.height) / 160} strokeLinejoin="round" />
       ))}
     </svg>
   );
 }
 
+/** The card of a pattern of a library — the shared one or the visitor's own. */
+function PatternCard({ name, note, thumb, worn, onWear, onForget }: { name: string; note: string; thumb: Thumb; worn: boolean; onWear: () => void; onForget?: () => void }) {
+  return (
+    <li className="relative">
+      <button
+        type="button"
+        onClick={onWear}
+        aria-pressed={worn}
+        title={note}
+        className="group flex h-full w-full flex-col overflow-hidden rounded-xl border border-line bg-panel text-left shadow-sm transition hover:-translate-y-0.5 hover:border-ink hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink aria-pressed:border-ink aria-pressed:ring-1 aria-pressed:ring-ink"
+      >
+        <div className="relative aspect-[3/4] w-full overflow-hidden bg-canvas">
+          <PatternThumb thumb={thumb} />
+          {worn && <span className="absolute left-2 top-2 rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium text-white">Actuel</span>}
+        </div>
+        <div className="px-2.5 py-2">
+          <p className="truncate text-[13px] font-semibold leading-tight">{name}</p>
+          <p className="mt-0.5 line-clamp-2 text-[10.5px] leading-snug text-muted">{note}</p>
+        </div>
+      </button>
+      {onForget && (
+        <button
+          type="button"
+          onClick={onForget}
+          aria-label={`Supprimer le patron « ${name} »`}
+          title="Supprimer ce patron de ce navigateur"
+          className="absolute right-1.5 top-1.5 grid size-6 place-items-center rounded-full border border-line bg-white/90 text-xs text-muted transition-colors hover:border-[#b2442f] hover:text-[#b2442f]"
+        >
+          ×
+        </button>
+      )}
+    </li>
+  );
+}
+
 const UNITS: Record<DxfUnits, string> = { auto: "Unités : auto", mm: "mm", cm: "cm", in: "pouces" };
 
-export function GarmentPicker({ open, current, onSelect, onDraw, onImport, saved, savedId, onWearSaved, onForgetSaved, hasDrawing, canCopy, onClose }: Props) {
-  const ref = useRef<HTMLDialogElement>(null);
+export function GarmentPicker({ open, current, onSelect, onDraw, onImport, shared, onWearShared, saved, savedId, onWearSaved, onForgetSaved, hasDrawing, canCopy, onClose }: Props) {
+  const search = useRef<HTMLInputElement>(null);
   const [units, setUnits] = useState<DxfUnits>("auto");
   const [importError, setImportError] = useState<string | null>(null);
   const readFile = async (file: File | undefined) => {
@@ -96,68 +117,65 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, saved
   const matches = (...texts: string[]) => words.every((w) => texts.some((t) => searchable(t).includes(w)));
   const catalogue = garmentsOf(cut).filter((g) => matches(g.name, g.description, g.short));
   const mine = saved.filter((p) => matches(p.name, p.note));
+  const common = shared.filter((p) => matches(p.name, p.note));
 
+  // Opened: the search is where one types; Escape goes back to the panel.
   useEffect(() => {
-    const d = ref.current;
-    if (!d) return;
-    if (open && !d.open) d.showModal();
-    else if (!open && d.open) d.close();
-  }, [open]);
+    if (!open) return;
+    search.current?.focus({ preventScroll: true });
+    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [open, onClose]);
 
+  const GRID = "grid grid-cols-2 gap-2.5";
   return (
-    <dialog
-      ref={ref}
-      onClose={onClose}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      aria-labelledby="garment-picker-title"
-      className="fixed inset-0 m-0 h-dvh max-h-none w-dvw max-w-none overflow-y-auto bg-canvas/95 p-0 text-ink backdrop:bg-ink/30 backdrop:backdrop-blur-sm"
-    >
-      <div className="mx-auto flex min-h-full max-w-6xl flex-col px-4 py-6 md:px-8 md:py-8" onClick={(e) => e.target === e.currentTarget && onClose()}>
-        <header className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-3">
-          <div className="min-w-0 flex-1">
-            <h2 id="garment-picker-title" className="text-xl font-semibold tracking-tight">
-              Choisir un vêtement
-            </h2>
-            <p className="mt-0.5 text-xs text-muted">Tracé sur les mesures du mannequin, puis cousu et drapé en 3D.</p>
-          </div>
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Rechercher un vêtement…"
-            aria-label="Rechercher un vêtement"
-            className="w-full rounded-full border border-line bg-white/80 px-3.5 py-1.5 text-xs outline-none placeholder:text-muted focus:border-ink sm:w-56"
-          />
-          <div className="inline-flex gap-1 rounded-full border border-line bg-white/60 p-1" role="group" aria-label="Coupe">
+    <div className="flex h-full min-h-0 flex-col bg-panel" role="region" aria-labelledby="garment-picker-title">
+      <header className="space-y-2.5 border-b border-line px-5 pb-3 pt-3 md:pt-4">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Revenir à l'atelier"
+            title="Retour"
+            className="grid size-7 shrink-0 place-items-center rounded-full border border-line text-muted transition-colors hover:border-ink hover:text-ink"
+          >
+            <svg viewBox="0 0 20 20" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+              <path d="M12 5l-5 5 5 5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <h2 id="garment-picker-title" className="min-w-0 flex-1 truncate text-sm font-semibold tracking-tight">
+            Choisir un vêtement
+          </h2>
+          <div className="inline-flex gap-1 rounded-full border border-line bg-white/60 p-0.5" role="group" aria-label="Coupe">
             {CUTS.map((c) => (
               <button
                 key={c}
                 type="button"
                 onClick={() => setShown({ cut: c, forOpen: open })}
                 aria-pressed={c === cut}
-                className="rounded-full px-3.5 py-1 text-xs font-medium text-muted transition-colors hover:text-ink aria-pressed:bg-ink aria-pressed:text-white"
+                className="rounded-full px-2.5 py-1 text-[11px] font-medium text-muted transition-colors hover:text-ink aria-pressed:bg-ink aria-pressed:text-white"
               >
                 {CUT_LABELS[c]}
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Fermer"
-            className="grid size-9 shrink-0 place-items-center rounded-full border border-line bg-white/80 text-muted transition-colors hover:border-ink hover:text-ink"
-          >
-            <svg viewBox="0 0 20 20" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-              <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" />
-            </svg>
-          </button>
-        </header>
+        </div>
+        <input
+          ref={search}
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Rechercher un vêtement…"
+          aria-label="Rechercher un vêtement"
+          className="w-full rounded-full border border-line bg-white/80 px-3.5 py-1.5 text-xs outline-none placeholder:text-muted focus:border-ink"
+        />
+      </header>
 
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
         {/* A pattern of one's own: drawn in the 2D editor, from simple shapes or from a garment of the catalogue. */}
-        <section className="mb-5 rounded-xl border border-line bg-panel p-3" aria-labelledby="garment-picker-drawing">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <section className="mb-5 rounded-xl border border-line bg-white/50 p-3" aria-labelledby="garment-picker-drawing">
+          <div className="flex flex-col gap-2.5">
             <div className="min-w-0 flex-1">
               <h3 id="garment-picker-drawing" className="text-sm font-semibold">
                 Dessiner son propre patron
@@ -219,54 +237,47 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, saved
           {hasDrawing && <p className="mt-2 text-[10.5px] text-muted">Un nouveau départ remplace le patron déjà dessiné.</p>}
         </section>
 
-        {/* The user's own patterns: what the assistant drew for them, kept in this browser. */}
-        {mine.length > 0 && (
-          <section className="mb-5" aria-labelledby="garment-picker-saved">
-            <h3 id="garment-picker-saved" className="mb-2 text-sm font-semibold">
-              Mes patrons <span className="font-normal text-muted">· dessinés par l&apos;assistant, gardés dans ce navigateur</span>
+        {/* The shared library: what the assistant drew, for every visitor. */}
+        {common.length > 0 && (
+          <section className="mb-5" aria-labelledby="garment-picker-shared">
+            <h3 id="garment-picker-shared" className="mb-2 text-sm font-semibold">
+              Bibliothèque commune <span className="font-normal text-muted">· dessinés par l&apos;assistant, disponibles pour tous</span>
             </h3>
-            <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-              {mine.map((p) => {
-                const worn = p.id === savedId && current === DRAWING;
-                return (
-                  <li key={p.id} className="relative">
-                    <button
-                      type="button"
-                      onClick={() => onWearSaved(p.id)}
-                      aria-pressed={worn}
-                      title={p.note}
-                      className="group flex h-full w-full flex-col overflow-hidden rounded-xl border border-line bg-panel text-left shadow-sm transition hover:-translate-y-0.5 hover:border-ink hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink aria-pressed:border-ink aria-pressed:ring-1 aria-pressed:ring-ink"
-                    >
-                      <div className="relative aspect-[3/4] w-full overflow-hidden bg-canvas">
-                        <PatternThumb pattern={p} />
-                        {worn && <span className="absolute left-2 top-2 rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium text-white">Actuel</span>}
-                      </div>
-                      <div className="px-2.5 py-2">
-                        <p className="truncate text-[13px] font-semibold leading-tight">{p.name}</p>
-                        <p className="mt-0.5 line-clamp-2 text-[10.5px] leading-snug text-muted">{p.note || `${p.free.pieces.length} pièces`}</p>
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onForgetSaved(p.id)}
-                      aria-label={`Supprimer le patron « ${p.name} »`}
-                      title="Supprimer ce patron de la bibliothèque"
-                      className="absolute right-1.5 top-1.5 grid size-6 place-items-center rounded-full border border-line bg-white/90 text-xs text-muted transition-colors hover:border-[#b2442f] hover:text-[#b2442f]"
-                    >
-                      ×
-                    </button>
-                  </li>
-                );
-              })}
+            <ul className={GRID}>
+              {common.map((p) => (
+                <PatternCard key={p.id} name={p.name} note={p.note || `${p.pieces} pièces`} thumb={p.thumb} worn={p.id === savedId && current === DRAWING} onWear={() => onWearShared(p.id)} />
+              ))}
             </ul>
           </section>
         )}
 
-        {mine.length > 0 && catalogue.length > 0 && <h3 className="mb-2 text-sm font-semibold">Catalogue</h3>}
-        {words.length > 0 && !mine.length && !catalogue.length && (
+        {/* The visitor's own: variants and retouches, kept in this browser. */}
+        {mine.length > 0 && (
+          <section className="mb-5" aria-labelledby="garment-picker-saved">
+            <h3 id="garment-picker-saved" className="mb-2 text-sm font-semibold">
+              Mes patrons <span className="font-normal text-muted">· variantes et retouches, gardées dans ce navigateur</span>
+            </h3>
+            <ul className={GRID}>
+              {mine.map((p) => (
+                <PatternCard
+                  key={p.id}
+                  name={p.name}
+                  note={p.note || `${p.free.pieces.length} pièces`}
+                  thumb={thumbOf(p.free)}
+                  worn={p.id === savedId && current === DRAWING}
+                  onWear={() => onWearSaved(p.id)}
+                  onForget={() => onForgetSaved(p.id)}
+                />
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {(mine.length > 0 || common.length > 0) && catalogue.length > 0 && <h3 className="mb-2 text-sm font-semibold">Catalogue</h3>}
+        {words.length > 0 && !mine.length && !common.length && !catalogue.length && (
           <p className="rounded-xl border border-line bg-panel p-4 text-xs text-muted">Aucun vêtement ne correspond à « {query.trim()} ». Demandez-le à l&apos;assistant : il le dessinera et il sera gardé ici.</p>
         )}
-        <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+        <ul className={GRID}>
           {catalogue.map((g) => {
             const selected = g.id === current;
             // The same style in the other cut is worn: this card switches the cut.
@@ -286,7 +297,7 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, saved
                       alt=""
                       width={THUMB.w}
                       height={THUMB.h}
-                      sizes="(min-width: 1024px) 180px, (min-width: 768px) 23vw, (min-width: 640px) 31vw, 46vw"
+                      sizes="(min-width: 768px) 160px, 46vw"
                       className="size-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
                     />
                     {(selected || twin) && (
@@ -305,6 +316,6 @@ export function GarmentPicker({ open, current, onSelect, onDraw, onImport, saved
           })}
         </ul>
       </div>
-    </dialog>
+    </div>
   );
 }

@@ -46,3 +46,4 @@ __pycache__/
 
 # simulation bench runs (machine-specific timings)
 /tools/sim-bench/results/
+.neon

@@ -124,7 +124,7 @@ export const assistantTools = {
   },
   wearSaved: {
     description:
-      "Wear one of the user's saved patterns (state.library: the garments drawn for them earlier, by id). A copy of it is worn; what is changed on it afterwards is saved as a variant, the saved pattern itself stays as it was.",
+      "Wear one of the patterns already drawn (state.library: the user's own and the shared library's, by id). A copy of it is worn; what is changed on it afterwards is saved as a variant of the user's, the pattern itself stays as it was.",
     inputSchema: assistantInputs.wearSaved,
   },
   removePieces: {
@@ -176,7 +176,7 @@ export interface AssistantState {
     clasps: { a: string; b: string }[];
     belts: { edge: string; stretch: number }[];
   };
-  /** The user's saved patterns (the garments drawn for them earlier), the latest first. */
+  /** The patterns already drawn: the visitor's own (variants, retouches), then the shared library's latest (drawn for any visitor). */
   library: { id: string; name: string; note: string; worn?: boolean }[];
   /** Whether the garment is still being sewn and draped. */
   draping: boolean;
