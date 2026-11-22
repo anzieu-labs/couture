@@ -6,6 +6,7 @@ import { download, exportDxf, exportPdf, exportSvg, type ExportOptions } from "@
 import { cutPieces } from "@/lib/pattern/markings";
 import { layoutRow, pieceBlock, type Prim } from "@/lib/pattern/sheet";
 import { CUT_LABELS, type GarmentDef, type GarmentParams } from "@/lib/pattern/garments";
+import type { DxfImport, DxfUnits } from "@/lib/pattern/import/dxf";
 import type { BodyMeasures, Pattern } from "@/lib/pattern/types";
 import { GarmentPicker } from "./GarmentPicker";
 import { RangeField } from "./RangeField";
@@ -16,6 +17,13 @@ interface Props {
   pattern: Pattern | null;
   garment: GarmentDef;
   onGarment: (id: string) => void;
+  /** A pattern of the user's own is started (from simple shapes, or as a copy of the garment worn) and worn. */
+  onDraw: (source: "simple" | "copy") => void;
+  /** A pattern of the user's own is read from a DXF file and worn; throws when it cannot be read. */
+  onImport: (text: string, units: DxfUnits) => DxfImport;
+  /** There is a drawing already; the garment worn can be copied into one. */
+  hasDrawing: boolean;
+  canCopy: boolean;
   params: GarmentParams;
   onParams: (p: GarmentParams) => void;
   measures: BodyMeasures | null;
@@ -154,20 +162,33 @@ function ExportSection({ pattern, cutting, onCutting }: { pattern: Pattern | nul
 }
 
 export function PatternPanel({
-  pattern, garment, onGarment, params, onParams, measures, progress, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
+  pattern, garment, onGarment, onDraw, onImport, hasDrawing, canCopy, params, onParams, measures, progress, cutting, onCutting, editorOpen, onEditor, editCount, onResetEdits, issues,
 }: Props) {
   const simulating = progress > 0 && progress < 1;
   const [picking, setPicking] = useState(false);
+  // What the last DXF import read, told under the garment until dismissed or until another garment is worn.
+  const [imported, setImported] = useState<{ read: DxfImport; garment: string } | null>(null);
+  const read = imported?.garment === garment.id ? imported.read : null;
   // Pieces to cut, as printed (a piece listed twice for the simulation is one piece cut ×2).
   const pieceCount = pattern ? new Set(pattern.pieces.map((p) => p.name)).size : 0;
   return (
     <>
       <Section title="Vêtement">
         <div className="flex items-center gap-3 rounded-xl border border-line bg-white/60 p-2 pr-3">
-          <Image src={garment.image} alt="" width={48} height={64} className="h-16 w-12 shrink-0 rounded-lg bg-canvas object-cover" />
+          {garment.image ? (
+            <Image src={garment.image} alt="" width={48} height={64} className="h-16 w-12 shrink-0 rounded-lg bg-canvas object-cover" />
+          ) : (
+            <span className="grid h-16 w-12 shrink-0 place-items-center rounded-lg bg-canvas text-muted" aria-hidden>
+              <svg viewBox="0 0 24 24" className="size-6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+                <path d="M5 20 4 9l4-5h8l4 5-1 11z" />
+                <circle cx="8" cy="4" r="1.2" fill="currentColor" />
+                <circle cx="16" cy="4" r="1.2" fill="currentColor" />
+              </svg>
+            </span>
+          )}
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold">
-              {garment.name} <span className="font-normal text-muted">· {CUT_LABELS[garment.cut].toLowerCase()}</span>
+              {garment.name} {garment.image && <span className="font-normal text-muted">· {CUT_LABELS[garment.cut].toLowerCase()}</span>}
             </p>
             <p className="truncate text-[11px] text-muted">{garment.description}</p>
           </div>
@@ -186,9 +207,42 @@ export function PatternPanel({
             onGarment(kind);
             setPicking(false);
           }}
+          onDraw={(source) => {
+            onDraw(source);
+            setPicking(false);
+            setImported(null);
+          }}
+          onImport={(text, units) => {
+            setImported({ read: onImport(text, units), garment: "free" });
+            setPicking(false);
+          }}
+          hasDrawing={hasDrawing}
+          canCopy={canCopy}
           onClose={() => setPicking(false)}
         />
       </Section>
+
+      {read && (
+        <div className="rounded-lg border border-line bg-white/70 p-3 text-[11px] leading-relaxed" role="status">
+          <p className="flex items-start justify-between gap-2 font-semibold">
+            <span>
+              DXF importé : {read.pieces.length} pièce{read.pieces.length > 1 ? "s" : ""}
+            </span>
+            <button type="button" onClick={() => setImported(null)} aria-label="Fermer" className="-mt-0.5 text-muted hover:text-ink">
+              ×
+            </button>
+          </p>
+          <p className="mt-1 text-muted">
+            Lu en {{ mm: "millimètres", cm: "centimètres", in: "pouces" }[read.units]}
+            {read.guessed ? " (unité devinée d'après les tailles)" : ""}, sur {{ sew: "la ligne de couture", cut: "la ligne de coupe (marges comprises, s'il y en a)", other: "le plus grand contour fermé" }[read.line]} :{" "}
+            {read.pieces.map((p) => `${p.name} ${p.width.toFixed(0)} × ${p.height.toFixed(0)} cm`).join(", ")}.
+          </p>
+          <p className="mt-1">
+            Un DXF ne dit ni les coutures ni où se porte chaque pièce : dans l&apos;éditeur 2D, vérifiez la zone et la hauteur de chaque pièce (liste « Pièces »), puis cousez les bords avec
+            l&apos;outil « Couture ».
+          </p>
+        </div>
+      )}
 
       <Section title="Patron" aside={pattern ? `${pieceCount} pièces` : undefined}>
         <div className="rounded-lg border border-line bg-white/60 p-3">

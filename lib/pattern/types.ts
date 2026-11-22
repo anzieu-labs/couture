@@ -41,6 +41,12 @@ export type GarmentKind = "tshirt" | "cape" | "skirt";
 
 export type PieceId = string;
 
+/**
+ * Where a piece of a top is put on the body before sewing (lib/garment/place.ts): wrapped
+ * round the trunk at the front or at the back, or round an arm.
+ */
+export type Zone = "front" | "back" | "armL" | "armR";
+
 /** Which allowance the cut line adds outside the edge (see `lib/pattern/markings.ts`). */
 export type EdgeAllowance = "seam" | "hem" | "none";
 
@@ -72,6 +78,8 @@ export interface Piece {
   symmetric: boolean;
   /** Where the piece's name and cutting notes go. */
   label: P2;
+  /** Where it is put on before sewing; told by its id when left out ("front", "back", "sleeve+": the left arm). */
+  zone?: Zone;
   /** Grain line and label of the half piece cut on the fold (default: derived from the width). */
   foldGrain?: [P2, P2];
   foldLabel?: P2;

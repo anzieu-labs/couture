@@ -1,4 +1,4 @@
-import { polylineLength } from "./curves";
+import { polylineLength, type P2 } from "./curves";
 import type { Band, Belt, Pattern, SeamSide } from "./types";
 
 /**
@@ -32,9 +32,10 @@ export function beltRing(pattern: Pattern, belt: Pick<Belt, "piece" | "edge">): 
   // From each end of the first edge: the next edge round the piece; across a seam, the edge next
   // to the same end of the seam on the other piece.
   for (const forward of [true, false]) {
-    let piece = belt.piece, index = start, ahead = forward;
+    let piece = belt.piece, index = start, ahead = forward, crossed = false;
     for (let guard = 0; guard < 64; guard++) {
       const edges = pieces.get(piece)!.edges;
+      const previous = index;
       index = (index + (ahead ? 1 : edges.length - 1)) % edges.length;
       const seam = sewn.get(sideKey(piece, edges[index].id));
       if (seam) {
@@ -47,14 +48,31 @@ export function beltRing(pattern: Pattern, belt: Pick<Belt, "piece" | "edge">): 
         piece = seam.other.piece;
         index = at;
         ahead = !atStart; // away from the seam: back from its start, on from its end
+        crossed = true;
         continue;
       }
       const key = sideKey(piece, edges[index].id);
-      if (base(edges[index].id) !== name || ring.has(key)) break;
+      if (ring.has(key)) break;
+      // Round a piece: the edge of the same name, or one that goes straight on (a drawn pattern's
+      // edges have no names: its waist is whatever continues the edge pointed at). Across a seam:
+      // whatever free edge is there.
+      if (!crossed && base(edges[index].id) !== name && !straightOn(edges[previous].pts, edges[index].pts, ahead)) break;
       ring.set(key, { piece, edge: edges[index].id });
+      crossed = false;
     }
   }
   return [...ring.values()];
+}
+
+/** Whether an edge goes straight on into the next one round the piece (within 35°), at the corner they share. */
+function straightOn(from: P2[], to: P2[], ahead: boolean): boolean {
+  const end = (pts: P2[], last: boolean): P2 => {
+    const a = pts[last ? pts.length - 2 : 0], b = pts[last ? pts.length - 1 : 1];
+    return [b[0] - a[0], b[1] - a[1]];
+  };
+  // Going forward: out of the end of `from`, into the start of `to`; backward, the other ends.
+  const u = end(from, ahead), v = end(to, !ahead);
+  return (u[0] * v[0] + u[1] * v[1]) / (Math.hypot(u[0], u[1]) * Math.hypot(v[0], v[1]) || 1) > Math.cos((35 * Math.PI) / 180);
 }
 
 /** Length of the edges a belt runs along (cm). */

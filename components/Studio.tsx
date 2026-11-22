@@ -187,6 +187,8 @@ export default function Studio() {
               onClasps={garment.commitClasps}
               belts={garment.belts}
               onBelts={garment.commitBelts}
+              free={garment.free}
+              onFree={garment.setFree}
               onUndo={garment.undo}
               onRedo={garment.redo}
               canUndo={garment.canUndo}
@@ -326,6 +328,17 @@ export default function Studio() {
               onParams={garment.setParams}
               garment={garment.garment}
               onGarment={garment.setKind}
+              onDraw={(source) => {
+                garment.startFree(source);
+                setEditorOpen(true);
+              }}
+              onImport={(text, units) => {
+                const read = garment.importFree(text, units);
+                setEditorOpen(true);
+                return read;
+              }}
+              hasDrawing={garment.hasDrawing}
+              canCopy={garment.canCopy}
               measures={garment.measures}
               progress={simProgress}
               cutting={cutting}

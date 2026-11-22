@@ -211,6 +211,65 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   disponibles (icône, nom, une ligne) ; on en choisit un puis on clique sur le patron. Pour en
   ajouter : une entrée de `ACCESSORIES` (`components/PatternEditor.tsx`), son outil, et ce que la
   simulation en fait.
+  Avec l'outil, le bord survolé — et tout son tour — prend la couleur de la ceinture s'il peut la
+  recevoir (rien sur une couture).
+- [x] **Patron libre** (2026-11, `lib/pattern/free.ts`) : dessiner son propre patron. Dans le
+  choix du vêtement, « Dessiner son propre patron » : partir de formes simples (une tunique sans
+  manches : devant et dos avec encolure et emmanchures, cousus aux épaules et sur les côtés) ou
+  **copier le vêtement porté** (mêmes pièces, bords — leurs noms gardés : ses fermoirs et
+  ceintures tiennent encore — et coutures ; chaque pièce devient un dessin à part). Un seul
+  dessin, repris par « Reprendre mon patron ».
+  - Dessin (`FreePattern`) : des pièces faites de points, un bord entre deux points, droit ou
+    courbé — il passe par le point qu'on tire en son milieu (parabole), ou garde la courbe
+    copiée d'un tracé tant qu'on n'y touche pas. Converti en `Pattern` (`draftFree`) : maillage,
+    simulation, exports, fermoirs et ceintures n'y voient aucune différence.
+  - Éditeur 2D : glisser un point ou le milieu d'un bord (aussi sur le vêtement en 3D) ;
+    double-clic sur un bord : un point de plus ; Suppr ou double-clic sur un point : l'enlever
+    (sur un milieu : bord redevenu droit) ; « Couture » : un bord, puis celui auquel il se coud
+    (sens deviné d'après la direction des deux bords sur la feuille, inversable par ⇄ dans la
+    liste, ×  pour découdre) ; « Pièce + » : un rectangle sur la zone choisie ; liste des pièces
+    avec leur zone et leur suppression. Les déplacements sont pris dans le dessin à chaque geste
+    (`bakeFree`) : pas d'« écarts » à réinitialiser ; même annuler / rétablir.
+  - **Zone du corps** de chaque pièce (`Zone`, `Piece.zone`) : devant ou dos (enroulée autour du
+    tronc), bras gauche ou droit (autour du bras) — c'est ce qui dit où la poser avant couture
+    (`placeTShirt`, par zone et non plus par nom de pièce). Une pièce est dessinée là où elle se
+    porte : x depuis le milieu du corps (ou le dessus du bras), y depuis la ligne d'épaule.
+  Vérifié sur le GPU réel : tunique de départ cousue et portée (8 240 sommets, au repos en
+  5,3 s) ; point ajouté sur l'ourlet du dos et tiré de 3,5 cm (recousu en pointe) ; pièce « Bras
+  gauche » ajoutée puis cousue bord à bord en tube sur le bras ; ceinture sur l'ourlet. Au
+  solveur de référence, 8 s de marche : départ simple (homme et femme), copies du t-shirt, de la
+  jupe et de la robe — allongement p99 10 à 21 %, tout fini.
+  *Limites* : zones du haut du corps seulement — une jupe copiée est posée comme un cylindre
+  (elle tient par sa ceinture), pas de zone jambe (pantalon), une cape ne se copie pas (son
+  cercle se pose à plat) ; pas de pièce miroir (les deux manches se dessinent séparément), ni de
+  couture d'un bord sur le milieu d'une pièce (poche), ni de renommage des pièces ; un dessin
+  n'est pas enregistré (perdu au rechargement) ; les bords n'ont que la courbure d'un point.
+- [x] **Import DXF AAMA / ASTM** (2026-11, `lib/pattern/import/dxf.ts`) : « Importer un DXF… »
+  dans « Dessiner son propre patron » lit les pièces d'un fichier DXF texte vers un patron libre.
+  Lu : un BLOCK par pièce ou des pièces en vrac dans ENTITIES ; POLYLINE / VERTEX (arcs « bulge »
+  compris), LWPOLYLINE, LINE séparées raboutées, SPLINE (points de passage) ; la ligne de couture
+  (calque 14) si elle existe, sinon la ligne de coupe (calque 1), sinon le plus grand contour
+  fermé ; les coins = points d'angle (calque 2) qui tombent sur le contour, sinon là où il tourne
+  de plus de 30° ; le nom (« Piece Name: »), la quantité (« Quantity: 2 » : la pièce arrive deux
+  fois) ; les unités (« Units: METRIC / ENGLISH », `$INSUNITS`, `$MEASUREMENT`, sinon devinées
+  d'après les tailles, ou imposées : mm, cm, pouces). Les courbes gardent leur forme exacte
+  (bords « shape »). Chaque pièce est centrée, son haut à la ligne d'épaule (à la taille si son
+  nom dit jupe, pantalon…), sur la zone que son nom suggère (dos / back, manche / sleeve : bras
+  gauche puis droit, sinon devant) ; un compte rendu sous le vêtement dit ce qui a été lu.
+  Un DXF ne dit ni les coutures ni où se portent les pièces : elles arrivent **non cousues**
+  (elles tombent au sol tant qu'on n'a rien cousu) ; dans l'éditeur, zone et hauteur de chaque
+  pièce (↑ ↓ : 5 cm, `movePiece`) puis outil « Couture ».
+  Vérifié : aller-retour de nos exports (t-shirt avec et sans marges, jupe, cape, robe : contours
+  identiques au dixième de millimètre, 263,0 / 250,6 / 101,6 cm pour le t-shirt) ; fichier en
+  pouces sans blocs, LWPOLYLINE avec arc et LINE séparées ; fichier façon ASTM (points d'angle,
+  noms en capitales, quantité) ; fichier illisible refusé avec un message ; dans l'app, 4 pièces
+  lues et affichées dans l'éditeur.
+  *Limites* : DXF binaire non lu ; crans (calque 4), droit-fil (7), lignes internes (8) et ligne
+  miroir des demi-pièces (6) ignorés — une demi-pièce au pli arrive en demi-pièce ; ARC et
+  ELLIPSE isolés non lus ; fichiers de gradation (.rul) non lus : une seule taille ; aucun fichier
+  d'un logiciel du commerce n'a été essayé, seulement nos exports et des fichiers écrits à la main.
+  *À faire* : proposer des coutures d'après les longueurs de bords et les crans ; export du
+  patron libre vers ces mêmes formats (il passe déjà par l'export existant).
 - [ ] **Variantes du t‑shirt** : col V, oversize.
 - [ ] **Finitions des bords libres** (choix par bord, au design) : ourlet replié, bord-côte cousu, biais,
   parementure. Aujourd'hui tous les bords sont francs. Un premier essai d'ourlet automatique sur tous les bords

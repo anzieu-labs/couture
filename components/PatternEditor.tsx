@@ -5,9 +5,10 @@ import { BELT_STRETCH, ringLength, validBelts } from "@/lib/pattern/belt";
 import { distanceToPiece, piecePointAt, piecePointPosition, twinPoint, validClasps } from "@/lib/pattern/clasp";
 import type { P2 } from "@/lib/pattern/curves";
 import { constrain, SNAP, withDelta } from "@/lib/pattern/edit";
+import { addPiece, addSeam, flipSeam, freeSeams, insertPoint, movePiece, removePiece, removePoint, removeSeam, setZone, straighten, ZONES, type FreePattern } from "@/lib/pattern/free";
 import { cutPieces, type Allowances } from "@/lib/pattern/markings";
 import type { GarmentDef, GarmentParams } from "@/lib/pattern/garments";
-import { NO_EDITS, seamSideLength, type Belt, type BodyMeasures, type Clasp, type Handle, type Pattern, type PatternEdits, type Piece, type PiecePoint } from "@/lib/pattern/types";
+import { NO_EDITS, seamSideLength, type Belt, type BodyMeasures, type Clasp, type Handle, type Pattern, type PatternEdits, type Piece, type PiecePoint, type Zone } from "@/lib/pattern/types";
 import { outline, patternIssues } from "@/lib/pattern/validate";
 import { edgeColorer } from "./seamColors";
 
@@ -30,6 +31,12 @@ interface Props {
   /** Belts, likewise (the "Ceinture" tool). */
   belts: readonly Belt[];
   onBelts: (belts: readonly Belt[]) => void;
+  /**
+   * The user's own drawing when that is what is edited (lib/pattern/free.ts), and how this
+   * editor changes it: points added and removed, edges bent, seams, pieces. Null for a draft.
+   */
+  free: FreePattern | null;
+  onFree: (free: FreePattern) => void;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -131,7 +138,7 @@ function shownPieces(pattern: Pattern) {
  * of a drag under way are shared (`live`), whichever side it happens on.
  * Memoised: the studio re-renders with the simulation progress, the editor need not.
  */
-export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onCommit, clasps, onClasps, belts, onBelts, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
+export const PatternEditor = memo(function PatternEditor({ garment, measures, params, edits, live, onLive, focusKey, onFocus, onCommit, clasps, onClasps, belts, onBelts, free, onFree, onUndo, onRedo, canUndo, canRedo, allowances, onClose }: Props) {
   const liveRef = useRef<PatternEdits | null>(null);
   const shown = live ?? edits;
   const pattern = useMemo(() => garment.draft(measures, params, shown), [garment, measures, params, shown]);
@@ -224,11 +231,19 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   const [hotBelt, setHotBelt] = useState<number | null>(null);
   const [selectedBelt, setSelectedBelt] = useState<number | null>(null);
   const [palette, setPalette] = useState(false);
-  const tool: Accessory | null = placing ? "clasp" : belting ? "belt" : null;
-  const chooseTool = (next: Accessory | null) => {
+  // A drawn pattern's own tools: "Couture" (`a`: its first edge, once clicked) and the menu of new pieces.
+  const [seaming, setSeaming] = useState<{ a: { piece: string; edge: string } | null } | null>(null);
+  // The edge under the pointer while a tool that takes edges is on (belt, seam): shown as what a click would make.
+  const [aimed, setAimed] = useState<{ piece: string; edge: string } | null>(null);
+  const [adding, setAdding] = useState(false);
+  const tool: Accessory | "seam" | null = placing ? "clasp" : belting ? "belt" : seaming ? "seam" : null;
+  const chooseTool = (next: Accessory | "seam" | null) => {
     setPlacing(next === "clasp" ? { a: null } : null);
     setBelting(next === "belt");
+    setSeaming(next === "seam" ? { a: null } : null);
     setPalette(false);
+    setAdding(false);
+    setAimed(null);
   };
 
   const setLiveEdits = (e: PatternEdits | null) => {
@@ -281,13 +296,9 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
     onClasps([...clasps, clasp]);
     setPlacing(null);
   };
-  /**
-   * A click of the "Ceinture" tool: on a free edge of a piece — not a seam — which becomes a
-   * belt, all the way round the garment (lib/pattern/belt.ts). One per tour: a second one
-   * replaces the first.
-   */
-  const placeBelt = (clientX: number, clientY: number) => {
-    if (!view) return;
+  /** The edge of a drawn piece under the pointer (within the belts' reach), and the place pointed at on its piece. */
+  const edgeAt = (clientX: number, clientY: number): { piece: string; edge: string; pos: P2 } | null => {
+    if (!view) return null;
     const [sx, sy] = toSheet(clientX, clientY);
     let hit: { piece: Piece; pos: P2; d: number } | null = null;
     for (const slot of layout.slots) {
@@ -297,9 +308,36 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
       const d = distanceToPiece(piece, pos);
       if (d <= BELT.reach / view.s && (!hit || d < hit.d)) hit = { piece, pos, d };
     }
-    if (!hit) return;
+    if (!hit) return null;
     const point = piecePointAt(hit.piece, hit.pos, BELT.reach / view.s);
-    if (point.offset[0] !== 0 || point.offset[1] !== 0) return; // inside the piece, away from its edges
+    // Inside the piece, away from its edges: none.
+    return point.offset[0] === 0 && point.offset[1] === 0 ? { piece: point.piece, edge: point.edge, pos: hit.pos } : null;
+  };
+  /** A click of the "Couture" tool of a drawn pattern: an edge, then the edge it is sewn to. */
+  const placeSeam = (clientX: number, clientY: number) => {
+    const at = edgeAt(clientX, clientY);
+    if (!at || !free || !seaming) return;
+    const side = { piece: at.piece, edge: at.edge };
+    if (!seaming.a) return setSeaming({ a: side });
+    if (seaming.a.piece === side.piece && seaming.a.edge === side.edge) return; // the same edge: wait for another
+    onFree(addSeam(free, seaming.a, side));
+    setSeaming(null);
+  };
+  /** A drawn pattern: what Suppr or a double click does to a handle — a point goes, a bent edge is straight again. */
+  const freeRemove = (key: string) => {
+    if (!free) return;
+    const dot = key.indexOf("."), piece = key.slice(0, dot), what = key.slice(dot + 1);
+    onFree(what.startsWith("c:") ? straighten(free, piece, what.slice(2)) : removePoint(free, piece, Number(what.slice(1))));
+    setSelected(null);
+  };
+  /**
+   * A click of the "Ceinture" tool: on a free edge of a piece — not a seam — which becomes a
+   * belt, all the way round the garment (lib/pattern/belt.ts). One per tour: a second one
+   * replaces the first.
+   */
+  const placeBelt = (clientX: number, clientY: number) => {
+    const point = edgeAt(clientX, clientY);
+    if (!point) return;
     const belt: Belt = { piece: point.piece, edge: point.edge, stretch: BELT_STRETCH.initial };
     const [added] = validBelts(pattern, [belt]);
     if (!added) return; // a seam: wait for a click on a free edge
@@ -320,6 +358,12 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
 
   const onPointerMove = (e: React.PointerEvent) => {
     const d = drag.current;
+    if (!d && (belting || seaming)) {
+      // What a click here would take: an edge that can be belted (not a seam), or any edge to sew.
+      const at = edgeAt(e.clientX, e.clientY);
+      const next = at && (seaming || validBelts(pattern, [{ piece: at.piece, edge: at.edge, stretch: 0 }]).length) ? { piece: at.piece, edge: at.edge } : null;
+      if (next?.piece !== aimed?.piece || next?.edge !== aimed?.edge) setAimed(next);
+    }
     if (!d) return;
     if (d.kind === "pan") {
       const v = d.startView;
@@ -348,6 +392,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
     if (d?.kind !== "pan" || d.moved || e.type !== "pointerup") return;
     if (placing) placeClasp(e.clientX, e.clientY, e.altKey);
     else if (belting) placeBelt(e.clientX, e.clientY);
+    else if (seaming) placeSeam(e.clientX, e.clientY);
   };
 
   const resetHandle = useCallback((key: string) => onCommit(withDelta(edits, key, [0, 0])), [edits, onCommit]);
@@ -369,7 +414,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
         onRedo();
         return;
       }
-      if ((placing || belting || palette) && e.key === "Escape") return chooseTool(null);
+      if ((placing || belting || palette || seaming || adding) && e.key === "Escape") return chooseTool(null);
       if (selectedBelt !== null && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
         onBelts(belts.filter((_, i) => i !== selectedBelt));
@@ -390,7 +435,8 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
       if (e.key === "Escape") setSelected(null);
       else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
-        resetHandle(selected);
+        if (free) freeRemove(selected);
+        else resetHandle(selected);
       } else if (e.key.startsWith("Arrow")) {
         e.preventDefault();
         const step = e.shiftKey ? 1 : SNAP;
@@ -402,7 +448,9 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, pattern, edits, onCommit, onUndo, onRedo, resetHandle, placing, belting, palette, selectedClasp, clasps, onClasps, selectedBelt, belts, onBelts]);
+    // chooseTool and freeRemove are made anew at each render: what they read is listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, pattern, edits, onCommit, onUndo, onRedo, resetHandle, placing, belting, palette, seaming, adding, free, onFree, selectedClasp, clasps, onClasps, selectedBelt, belts, onBelts]);
 
   // ---- Drawing.
   const s = view?.s ?? 1;
@@ -444,7 +492,8 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
   // ---- Belts: the edges each runs along, and the one it was put on.
   const worn = validBelts(pattern, belts);
   const beltIndex = (b: Belt) => belts.indexOf(b);
-  const beltName = (b: Belt) => EDGE_NAMES[b.edge.replace(/[+-]$/, "")] ?? b.edge;
+  // A drawn pattern's own edges have no name ("e12"): "bord".
+  const beltName = (b: Belt) => EDGE_NAMES[b.edge.replace(/[+-]$/, "")] ?? (/^e\d+$/.test(b.edge) ? "bord" : b.edge);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
@@ -455,9 +504,39 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
         <ToolButton onClick={() => onCommit(NO_EDITS)} disabled={editCount === 0} title="Revenir au tracé d'origine (morphologie et coupe conservées)">
           Réinitialiser{editCount ? ` (${editCount})` : ""}
         </ToolButton>
+        {free && (
+          <>
+            <div className="relative">
+              <ToolButton onClick={() => { chooseTool(null); setAdding((a) => !a); }} active={adding} title="Ajouter une pièce au patron" aria-expanded={adding}>
+                Pièce +
+              </ToolButton>
+              {adding && (
+                <div className="absolute right-0 top-full z-20 mt-2 w-56 rounded-xl border border-line bg-panel p-2 shadow-lg" role="menu" aria-label="Nouvelle pièce">
+                  <p className="mb-1.5 px-0.5 text-[10.5px] leading-snug text-muted">Un rectangle, posé sur la zone du corps choisie : à retailler ensuite.</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(Object.keys(ZONES) as Zone[]).map((zone) => (
+                      <button
+                        key={zone}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => { onFree(addPiece(free, zone, measures)); setAdding(false); setView(null); }}
+                        className="rounded-lg border border-line bg-white/70 px-2 py-1.5 text-left text-xs font-medium transition-colors hover:border-ink"
+                      >
+                        {ZONES[zone]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <ToolButton onClick={() => chooseTool(seaming ? null : "seam")} active={!!seaming} title="Coudre deux bords : cliquer un bord, puis celui auquel il se coud">
+              {seaming ? "Couture · annuler" : "Couture"}
+            </ToolButton>
+          </>
+        )}
         <div className="relative">
-          <ToolButton onClick={() => (tool ? chooseTool(null) : setPalette((p) => !p))} active={!!tool || palette} title="Ajouter un accessoire sur le patron" aria-expanded={palette}>
-            {tool ? `${ACCESSORIES.find((a) => a.id === tool)!.name} · annuler` : "Accessoires +"}
+          <ToolButton onClick={() => (tool && tool !== "seam" ? chooseTool(null) : (chooseTool(null), setPalette((p) => !p)))} active={(!!tool && tool !== "seam") || palette} title="Ajouter un accessoire sur le patron" aria-expanded={palette}>
+            {tool && tool !== "seam" ? `${ACCESSORIES.find((a) => a.id === tool)!.name} · annuler` : "Accessoires +"}
           </ToolButton>
           {palette && (
             <div className="absolute right-0 top-full z-20 mt-2 w-72 rounded-xl border border-line bg-panel p-2 shadow-lg" role="menu" aria-label="Accessoires">
@@ -509,6 +588,11 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
             className="absolute inset-0 touch-none select-none"
             style={{ cursor: tool ? "crosshair" : dragging === "pan" ? "grabbing" : "grab" }}
             onPointerDown={onPointerDown}
+            onDoubleClick={(e) => {
+              // A drawn pattern: a double click on an edge puts a point there.
+              const at = free && !tool ? edgeAt(e.clientX, e.clientY) : null;
+              if (at && free) onFree(insertPoint(free, at.piece, at.edge, at.pos));
+            }}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
@@ -555,7 +639,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
                     const c = colorOf(piece.id, e.id);
                     const hi = highlighted.has(`${piece.id}/${e.id}`);
                     return c ? (
-                      <polyline key={e.id} points={e.pts.map(T).join(" ")} fill="none" stroke={c} strokeWidth={px(hi ? 6 : 2.5)} strokeLinecap="round" strokeOpacity={hoverSeam && !hi ? 0.35 : 1} />
+                      <polyline key={e.id} data-edge={`${piece.id}/${e.id}`} points={e.pts.map(T).join(" ")} fill="none" stroke={c} strokeWidth={px(hi ? 6 : 2.5)} strokeLinecap="round" strokeOpacity={hoverSeam && !hi ? 0.35 : 1} />
                     ) : null;
                   })}
                   {handles.map((h) =>
@@ -577,7 +661,12 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
                       onPointerDown: (e: React.PointerEvent) => startHandleDrag(e, h, slot.ox, slot.oy),
                       onPointerEnter: () => setHovered(h.key),
                       onPointerLeave: () => setHovered((k) => (k === h.key ? null : k)),
-                      onDoubleClick: () => !tool && resetHandle(h.key),
+                      onDoubleClick: (e: React.MouseEvent) => {
+                        e.stopPropagation(); // not a double click on the edge under it
+                        if (tool) return;
+                        if (free) freeRemove(h.key);
+                        else resetHandle(h.key);
+                      },
                     };
                     const r = px(h.anchor ? 4.5 : 5.5);
                     return (
@@ -666,6 +755,21 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
               );
             })}
             {pending && <circle cx={pending.x} cy={pending.y} r={px(5)} fill={CLASP.color} stroke="white" strokeWidth={px(1.5)} pointerEvents="none" />}
+            {/* What a click would make: the belt all the way round, in its colour; the edge to sew. */}
+            {aimed &&
+              (belting ? (validBelts(pattern, [{ ...aimed, stretch: 0 }])[0]?.ring ?? []) : seaming ? [aimed] : []).map(({ piece, edge }) => {
+                const slot = layout.slots.find((sl) => sl.id === piece);
+                const pts = slot && pattern.pieces.find((q) => q.id === piece)?.edges.find((q) => q.id === edge)?.pts;
+                return slot && pts ? (
+                  <polyline key={`aim/${piece}/${edge}`} points={pts.map(([x, y]) => `${x + slot.ox},${slot.oy - y}`).join(" ")} fill="none" stroke={belting ? BELT.color : "#c0643e"} strokeWidth={px(5)} strokeLinecap="round" strokeLinejoin="round" strokeOpacity={0.75} pointerEvents="none" />
+                ) : null;
+              })}
+            {seaming?.a &&
+              (() => {
+                const slot = layout.slots.find((sl) => sl.id === seaming.a!.piece);
+                const pts = slot && pattern.pieces.find((q) => q.id === seaming.a!.piece)?.edges.find((q) => q.id === seaming.a!.edge)?.pts;
+                return slot && pts ? <polyline points={pts.map(([x, y]) => `${x + slot.ox},${slot.oy - y}`).join(" ")} fill="none" stroke="#c0643e" strokeWidth={px(6)} strokeLinecap="round" strokeOpacity={0.7} pointerEvents="none" /> : null;
+              })()}
           </svg>
         )}
 
@@ -678,7 +782,7 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
           </div>
         )}
 
-        <div className="pointer-events-auto absolute bottom-3 left-3 w-60 rounded-lg border border-line bg-white/90 p-2.5 text-[11px] shadow-sm backdrop-blur">
+        <div className="pointer-events-auto absolute bottom-3 left-3 max-h-[42%] w-60 overflow-y-auto rounded-lg border border-line bg-white/90 p-2.5 text-[11px] shadow-sm backdrop-blur">
           <p className="mb-1.5 font-semibold uppercase tracking-[0.14em] text-muted">Coutures</p>
           <ul className="space-y-1">
             {checks.map((c) => (
@@ -692,10 +796,82 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
                 <span className={`tabular-nums ${c.warn ? "font-semibold text-[#b2442f]" : "text-muted"}`}>
                   {c.kind === "match" ? `${fmt(c.a)} / ${fmt(c.b)} · ${signed(c.diff)}` : `embu ${signed(c.diff)}`}
                 </span>
+                {free &&
+                  (() => {
+                    const drawn = freeSeams(free).find((x) => x.id === c.seam)?.seam;
+                    const button = "grid size-5 shrink-0 place-items-center rounded-full text-muted transition-colors hover:bg-white hover:text-ink";
+                    return drawn ? (
+                      <span className="flex items-center">
+                        <button type="button" onClick={() => onFree(flipSeam(free, drawn))} title="Coudre dans l'autre sens (si la couture vrille)" aria-label={`Inverser la couture ${c.label}`} className={button}>
+                          ⇄
+                        </button>
+                        <button type="button" onClick={() => onFree(removeSeam(free, drawn))} title="Découdre" aria-label={`Supprimer la couture ${c.label}`} className={button}>
+                          ×
+                        </button>
+                      </span>
+                    ) : null;
+                  })()}
               </li>
             ))}
           </ul>
-          <p className="mt-1.5 text-[10px] leading-snug text-muted">Devant / dos (cm). Embu : tête de manche − emmanchure.</p>
+          <p className="mt-1.5 text-[10px] leading-snug text-muted">
+            {free ? (checks.length ? "Longueur des deux bords cousus (cm)." : "Aucune couture : outil « Couture », puis deux bords.") : "Devant / dos (cm). Embu : tête de manche − emmanchure."}
+          </p>
+          {free && (
+            <>
+              <p className="mb-1.5 mt-2.5 font-semibold uppercase tracking-[0.14em] text-muted">Pièces</p>
+              <ul className="space-y-1">
+                {free.pieces.map((piece) => (
+                  <li key={piece.id} className="flex items-center justify-between gap-2 px-1">
+                    <span className="min-w-0">
+                      <span className="block truncate">{piece.name}</span>
+                      {/* Where it is worn: the height of its top under the shoulder line (or the top of the arm). */}
+                      <span className="block text-[10px] text-muted">
+                        haut à {fmt(Math.max(0, -Math.max(...(pattern.pieces.find((q) => q.id === piece.id)?.edges.flatMap((e) => e.pts.map((pt) => pt[1])) ?? [0]))), 0)} cm
+                      </span>
+                    </span>
+                    <span className="flex items-center gap-0.5">
+                      {([[5, "↑", "Monter"], [-5, "↓", "Descendre"]] as const).map(([dy, sign, verb]) => (
+                        <button
+                          key={sign}
+                          type="button"
+                          onClick={() => onFree(movePiece(free, piece.id, dy))}
+                          title={`${verb} la pièce de 5 cm sur le corps (là où elle est dessinée, elle se porte)`}
+                          aria-label={`${verb} ${piece.name} de 5 cm`}
+                          className="grid size-5 place-items-center rounded-full text-muted transition-colors hover:bg-white hover:text-ink"
+                        >
+                          {sign}
+                        </button>
+                      ))}
+                      <select
+                        value={piece.zone}
+                        onChange={(e) => onFree(setZone(free, piece.id, e.target.value as Zone))}
+                        title="Où la pièce est posée sur le corps avant la couture"
+                        aria-label={`Zone du corps de ${piece.name}`}
+                        className="rounded border border-line bg-white px-1 py-0.5 text-[10.5px]"
+                      >
+                        {(Object.keys(ZONES) as Zone[]).map((zone) => (
+                          <option key={zone} value={zone}>
+                            {ZONES[zone]}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => { onFree(removePiece(free, piece.id)); setView(null); }}
+                        disabled={free.pieces.length <= 1}
+                        title="Supprimer la pièce"
+                        aria-label={`Supprimer la pièce ${piece.name}`}
+                        className="grid size-5 place-items-center rounded-full text-muted transition-colors hover:bg-white hover:text-ink disabled:opacity-30"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           {clasps.length + belts.length > 0 && (
             <>
               <p className="mb-1.5 mt-2.5 font-semibold uppercase tracking-[0.14em] text-muted">Accessoires</p>
@@ -764,7 +940,11 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
         </div>
 
         <div className="pointer-events-none absolute bottom-3 right-3 max-w-[60%] text-right text-[11px] text-muted">
-          {belting ? (
+          {seaming ? (
+            <p className="rounded-md bg-white/90 px-2 py-1 text-ink shadow-sm">
+              <span className="font-medium">Couture</span> · {seaming.a ? "cliquer le bord auquel il se coud" : "cliquer un bord"} · Échap : annuler
+            </p>
+          ) : belting ? (
             <p className="rounded-md bg-white/90 px-2 py-1 text-ink shadow-sm">
               <span className="font-medium">Ceinture</span> · cliquer un bord libre du patron (taille, bas, encolure… pas une couture) : il devient élastique sur tout son tour · Échap : annuler
             </p>
@@ -781,7 +961,11 @@ export const PatternEditor = memo(function PatternEditor({ garment, measures, pa
               <span className="font-medium">{focus.label}</span> · {pieceName(focus)} · Δ {signed(focusDelta[0])} / {signed(focusDelta[1])} cm
             </p>
           ) : (
-            <p>Glisser un point, ici ou sur le vêtement en 3D (Maj : axe) · double-clic : rétablir · flèches : 1 mm (Maj : 1 cm) · molette : zoom</p>
+            <p>
+              {free
+                ? "Glisser un point ou le milieu d'un bord (il se courbe) · double-clic sur un bord : nouveau point · Suppr ou double-clic sur un point : l'enlever · molette : zoom"
+                : "Glisser un point, ici ou sur le vêtement en 3D (Maj : axe) · double-clic : rétablir · flèches : 1 mm (Maj : 1 cm) · molette : zoom"}
+            </p>
           )}
         </div>
       </div>

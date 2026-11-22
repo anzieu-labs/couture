@@ -89,9 +89,11 @@ export function placeGarment(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFr
 }
 
 /**
- * T-shirt: body panels wrapped on an elliptic cylinder around the torso, sleeves
- * on a tube following each arm (underarm seam at the bottom). Unstretched unless
- * the garment is narrower than the body (e.g. a tight sleeve).
+ * T-shirt, and any top made of pieces worn on the trunk or on an arm (mesh.zones): the pieces
+ * of the front and of the back wrapped on an elliptic cylinder around the torso, those of an
+ * arm on a tube following it (a sleeve's underarm seam at the bottom) — each where its own
+ * coordinates put it. Unstretched unless the garment is narrower than the body (e.g. a tight
+ * sleeve).
  */
 function placeTShirt(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Float32Array {
   const n = mesh.rest.length / 2;
@@ -102,28 +104,29 @@ function placeTShirt(mesh: GarmentMesh, shape: BodyShape, torso: TorsoFrame): Fl
   const halfWidth = new Map<number, number>();
   for (let i = 0; i < n; i++) halfWidth.set(mesh.piece[i], Math.max(halfWidth.get(mesh.piece[i]) ?? 0, Math.abs(r[2 * i])));
   const panelHalfWidth = Math.max(
-    ...[...halfWidth].filter(([p]) => mesh.pieceIds[p] === "front" || mesh.pieceIds[p] === "back").map(([, w]) => w),
+    ...[...halfWidth].filter(([p]) => mesh.zones[p] === "front" || mesh.zones[p] === "back").map(([, w]) => w),
+    0.05,
   );
   const wrap = torsoWrap(torso, panelHalfWidth);
   const top = torso.hpsY + 0.02;
 
-  const arms: Record<string, ReturnType<typeof armPath>> = { "sleeve+": armPath(shape, "L"), "sleeve-": armPath(shape, "R") };
+  const arms = { armL: armPath(shape, "L"), armR: armPath(shape, "R") };
 
   for (let i = 0; i < n; i++) {
-    const id = mesh.pieceIds[mesh.piece[i]];
+    const zone = mesh.zones[mesh.piece[i]];
     const x = r[2 * i], y = r[2 * i + 1];
     const o = 3 * i;
-    if (id === "front" || id === "back") {
+    if (zone === "front" || zone === "back") {
       const theta = wrap.angleAt(x);
       out[o] = wrap.rx * Math.sin(theta);
       out[o + 1] = top + y;
-      out[o + 2] = torso.centerZ + (id === "front" ? 1 : -1) * wrap.rz * Math.cos(theta);
+      out[o + 2] = torso.centerZ + (zone === "front" ? 1 : -1) * wrap.rz * Math.cos(theta);
     } else {
       const hw = halfWidth.get(mesh.piece[i])!;
       // Circumference = sleeve width, unless the arm is wider (tight sleeve).
       const radius = Math.max(hw / Math.PI, torso.upperArmRadius + 0.008);
       const phi = x / radius;
-      const { center, up, fwd } = arms[id](-0.03 - y);
+      const { center, up, fwd } = arms[zone](-0.03 - y);
       const c = Math.cos(phi) * radius, sn = Math.sin(phi) * radius;
       for (let a = 0; a < 3; a++) out[o + a] = center[a] + up[a] * c + fwd[a] * sn;
     }

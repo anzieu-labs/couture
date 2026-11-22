@@ -2,7 +2,7 @@ import Constrainautor from "@kninnug/constrainautor";
 import Delaunator from "delaunator";
 import { piecePointPosition } from "./clasp";
 import { polylineLength, resample, type P2 } from "./curves";
-import type { Pattern, PieceId } from "./types";
+import type { Pattern, PieceId, Zone } from "./types";
 
 /**
  * Turns a pattern into a simulation mesh: every piece is sampled at ~`spacing`
@@ -19,6 +19,8 @@ export interface GarmentMesh {
   /** Piece index of each vertex. */
   piece: Uint8Array;
   pieceIds: PieceId[];
+  /** Where each piece of a top is put on before sewing (types.ts Zone). */
+  zones: Zone[];
   /** Mesh vertices along each pattern edge, in loop order (both end points included). */
   edges: { piece: PieceId; edge: string; vertices: Uint32Array }[];
   /** Stitched vertex pairs: the seams, then the clasps. */
@@ -213,6 +215,7 @@ export function meshPattern(pattern: Pattern, spacing = 2): GarmentMesh {
     triangles: new Uint32Array(tris),
     piece: Uint8Array.from(pieceOf),
     pieceIds: pattern.pieces.map((p) => p.id),
+    zones: pattern.pieces.map((p) => p.zone ?? (p.id === "back" ? "back" : p.id === "sleeve+" ? "armL" : p.id === "sleeve-" ? "armR" : "front")),
     edges: pattern.pieces.flatMap((p) => p.edges.map((e) => ({ piece: p.id, edge: e.id, vertices: Uint32Array.from(edgeVerts.get(key(p.id, e.id))!) }))),
     seams: new Uint32Array([...seams, ...clasps]),
     clasps: new Uint32Array(clasps),

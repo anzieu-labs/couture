@@ -12,8 +12,14 @@ const SEAM_STYLES: Record<string, { color: string; label: string }> = {
   hood: { color: "#3f9a96", label: "Milieu de capuche" },
 };
 
+/** Colours of the seams that have no name of their own (a drawn pattern's: "shoulder·1", "e12·4"). */
+const OTHER = ["#c0643e", "#3f7cac", "#8a6bb8", "#4f9a6a", "#c49a2c", "#3f9a96", "#b0527a", "#6b7f2a"];
+
 export function seamColor(kind: string | undefined): string | null {
-  return (kind && SEAM_STYLES[kind]?.color) || null;
+  if (!kind) return null;
+  const numbered = kind.match(/^(.*)·(\d+)$/);
+  if (!numbered) return SEAM_STYLES[kind]?.color ?? null;
+  return SEAM_STYLES[numbered[1]]?.color ?? OTHER[(Number(numbered[2]) - 1) % OTHER.length];
 }
 
 /** Colour of an edge of a pattern piece, from the seam it belongs to. */

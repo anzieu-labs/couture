@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { CUT_LABELS, CUTS, garmentDef, garmentId, garmentsOf, type Cut } from "@/lib/pattern/garments";
+import type { DxfUnits } from "@/lib/pattern/import/dxf";
 
 /** Thumbnail size (tools/thumbnails captures them at this ratio). */
 const THUMB = { w: 480, h: 640 };
@@ -12,8 +13,18 @@ interface Props {
   /** Id of the garment worn (lib/pattern/garments.ts). */
   current: string;
   onSelect: (id: string) => void;
+  /** A pattern of the user's own is started: from simple shapes, or as a copy of the garment worn. */
+  onDraw: (source: "simple" | "copy") => void;
+  /** A pattern of the user's own is read from a DXF file (AAMA / ASTM); throws, with a message for the user, when it cannot be. */
+  onImport: (text: string, units: DxfUnits) => void;
+  /** There is a drawing already (it can be taken up again); the garment worn can be copied into one. */
+  hasDrawing: boolean;
+  canCopy: boolean;
   onClose: () => void;
 }
+
+/** Id of the user's own drawing among the garments (components/hooks/useGarment.ts FREE). */
+const DRAWING = "free";
 
 /**
  * Full-page garment picker: a grid of small cards — the catalogue is meant to grow to dozens
@@ -21,12 +32,26 @@ interface Props {
  * one cut at a time; a switch in the header goes from the men's cuts to the women's. A native
  * modal dialog (focus kept inside, Escape closes); a click outside the cards closes it too.
  */
-export function GarmentPicker({ open, current, onSelect, onClose }: Props) {
+const UNITS: Record<DxfUnits, string> = { auto: "Unités : auto", mm: "mm", cm: "cm", in: "pouces" };
+
+export function GarmentPicker({ open, current, onSelect, onDraw, onImport, hasDrawing, canCopy, onClose }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
-  const worn = garmentDef(current);
+  const [units, setUnits] = useState<DxfUnits>("auto");
+  const [importError, setImportError] = useState<string | null>(null);
+  const readFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      onImport(await file.text(), units);
+      setImportError(null);
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Ce fichier n'a pas pu être lu.");
+    }
+  };
+  // The garment worn, when it is one of the catalogue's (not the user's own drawing).
+  const worn = garmentDef(current) as ReturnType<typeof garmentDef> | undefined;
   // The cut shown: the worn garment's each time the picker opens, then as switched.
-  const [shown, setShown] = useState<{ cut: Cut; forOpen: boolean }>({ cut: worn.cut, forOpen: open });
-  if (shown.forOpen !== open) setShown({ cut: worn.cut, forOpen: open });
+  const [shown, setShown] = useState<{ cut: Cut; forOpen: boolean }>({ cut: worn?.cut ?? "homme", forOpen: open });
+  if (shown.forOpen !== open) setShown({ cut: worn?.cut ?? shown.cut, forOpen: open });
   const cut = shown.cut;
 
   useEffect(() => {
@@ -79,11 +104,75 @@ export function GarmentPicker({ open, current, onSelect, onClose }: Props) {
           </button>
         </header>
 
+        {/* A pattern of one's own: drawn in the 2D editor, from simple shapes or from a garment of the catalogue. */}
+        <section className="mb-5 rounded-xl border border-line bg-panel p-3" aria-labelledby="garment-picker-drawing">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <div className="min-w-0 flex-1">
+              <h3 id="garment-picker-drawing" className="text-sm font-semibold">
+                Dessiner son propre patron
+                {current === DRAWING && <span className="ml-2 rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium text-white">Actuel</span>}
+              </h3>
+              <p className="mt-0.5 text-[11px] leading-snug text-muted">
+                Des pièces faites de points à glisser : on en ajoute, on courbe les bords, on coud deux bords en deux clics. Chaque pièce se pose sur une zone du corps.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {hasDrawing && current !== DRAWING && (
+                <button type="button" onClick={() => onSelect(DRAWING)} className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90">
+                  Reprendre mon patron
+                </button>
+              )}
+              <button type="button" onClick={() => onDraw("simple")} className="rounded-full border border-ink px-3.5 py-1.5 text-xs font-medium transition-colors hover:bg-ink hover:text-white">
+                Partir de formes simples
+              </button>
+              <button
+                type="button"
+                onClick={() => onDraw("copy")}
+                disabled={!canCopy}
+                title={canCopy ? "Le vêtement porté devient un dessin : mêmes pièces, mêmes coutures, tout modifiable" : "Ce vêtement ne peut pas être copié (cape : son cercle se pose à plat ; ou c'est déjà un dessin)"}
+                className="rounded-full border border-ink px-3.5 py-1.5 text-xs font-medium transition-colors hover:bg-ink hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink"
+              >
+                Copier le vêtement porté{worn ? ` (${worn.short.toLowerCase()})` : ""}
+              </button>
+              <span className="inline-flex items-stretch overflow-hidden rounded-full border border-ink text-xs font-medium">
+                <label
+                  title="Lire les pièces d'un patron au format DXF AAMA ou ASTM (Gerber, Lectra, Optitex, CLO…) : elles arrivent non cousues"
+                  className="cursor-pointer px-3.5 py-1.5 transition-colors hover:bg-ink hover:text-white focus-within:bg-ink focus-within:text-white"
+                >
+                  Importer un DXF…
+                  <input
+                    type="file"
+                    accept=".dxf,application/dxf,image/vnd.dxf"
+                    className="sr-only"
+                    onChange={(e) => {
+                      void readFile(e.target.files?.[0]);
+                      e.target.value = ""; // the same file can be chosen again
+                    }}
+                  />
+                </label>
+                <select value={units} onChange={(e) => setUnits(e.target.value as DxfUnits)} aria-label="Unités du fichier DXF" title="Unités du fichier : devinées, ou imposées si les pièces arrivent à la mauvaise taille" className="border-l border-ink bg-transparent px-1.5 text-[11px] font-normal outline-none">
+                  {(Object.keys(UNITS) as DxfUnits[]).map((u) => (
+                    <option key={u} value={u}>
+                      {UNITS[u]}
+                    </option>
+                  ))}
+                </select>
+              </span>
+            </div>
+          </div>
+          {importError && (
+            <p className="mt-2 text-[11px] text-[#b2442f]" role="alert">
+              {importError}
+            </p>
+          )}
+          {hasDrawing && <p className="mt-2 text-[10.5px] text-muted">Un nouveau départ remplace le patron déjà dessiné.</p>}
+        </section>
+
         <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
           {garmentsOf(cut).map((g) => {
             const selected = g.id === current;
             // The same style in the other cut is worn: this card switches the cut.
-            const twin = !selected && g.id === garmentId(worn.style, cut);
+            const twin = !selected && !!worn && g.id === garmentId(worn.style, cut);
             return (
               <li key={g.id}>
                 <button
@@ -104,7 +193,7 @@ export function GarmentPicker({ open, current, onSelect, onClose }: Props) {
                     />
                     {(selected || twin) && (
                       <span className={`absolute left-2 top-2 rounded-full px-2 py-0.5 text-[10px] font-medium ${selected ? "bg-ink text-white" : "bg-white/90 text-ink"}`}>
-                        {selected ? "Actuel" : `Actuel en ${CUT_LABELS[worn.cut].toLowerCase()}`}
+                        {selected ? "Actuel" : `Actuel en ${CUT_LABELS[worn!.cut].toLowerCase()}`}
                       </span>
                     )}
                   </div>
