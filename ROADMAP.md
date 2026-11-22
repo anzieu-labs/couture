@@ -375,6 +375,10 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   proche du pointeur à l'écran, à 9 pixels au plus, sauf si du tissu ou la peau le cache) allume
   sa couture sur le patron 2D et sa ligne dans la liste ; un bord libre (ourlet, encolure) est
   montré seul.
+  La pose n'est plus un onglet : un sélecteur sur la vue 3D, sous Tissu / Tension / Étirement
+  (Debout, Marche, Assise, Accroupie), avec la cadence quand le mannequin marche (au-delà de
+  155 pas/min l'option s'appelle « Course »). La pose ne se remet plus à zéro en changeant
+  d'onglet.
   Le panneau de gauche (« Atelier ») se replie comme l'assistant (flèche dans son en-tête, bouton
   « Atelier » sur la vue 3D pour le rouvrir ; ordinateur seulement, sur téléphone il est la page
   sous la vue) : la vue 3D prend la place, les réglages et l'onglet ouvert sont gardés.

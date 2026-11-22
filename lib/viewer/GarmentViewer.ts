@@ -364,7 +364,7 @@ export class GarmentViewer {
     for (const side of ["L", "R"] as const) if (this.animator.handTargets[side]) this.setHandTarget(side, null);
   }
 
-  /** Shows the wrist handles (Pose tab). */
+  /** Shows the wrist handles. */
   setHandlesVisible(on: boolean) {
     this.handles.setVisible(on);
   }

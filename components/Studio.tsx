@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type { AssistantState } from "@/lib/assistant/tools";
 import { FEMALE, MALE, MORPHOLOGY_SLIDERS, type Morphology } from "@/lib/avatar/morphology";
-import { CADENCE, type Posture } from "@/lib/avatar/motion";
+import { CADENCE, RUN_CADENCE, type Posture } from "@/lib/avatar/motion";
 import type { P2 } from "@/lib/pattern/curves";
 import { constrain, withDelta } from "@/lib/pattern/edit";
 import type { ExportOptions } from "@/lib/pattern/export";
@@ -24,15 +24,14 @@ import { useViewer } from "./hooks/useViewer";
 import { MorphologyPanel } from "./MorphologyPanel";
 import { PatternEditor } from "./PatternEditor";
 import { PatternPanel } from "./PatternPanel";
-import { PosePanel } from "./PosePanel";
+import { RangeField } from "./RangeField";
 import { edgeColorer } from "./seamColors";
 import { TextilePanel } from "./TextilePanel";
 
-type Tab = "morpho" | "pose" | "patron" | "tissu";
+type Tab = "morpho" | "patron" | "tissu";
 
 const TABS: [Tab, string][] = [
   ["morpho", "Morphologie"],
-  ["pose", "Pose"],
   ["patron", "Patron"],
   ["tissu", "Tissu"],
 ];
@@ -45,6 +44,15 @@ const VIEW_LABELS: { id: ViewPreset; label: string }[] = [
 ];
 
 const PRESETS = { Homme: MALE, Femme: FEMALE };
+
+/** The mannequin's poses, as the select on the 3D view offers them: standing still, walking on the spot (or running, by the cadence), or a held posture. */
+type Pose = Posture | "walking";
+const POSES: { id: Pose; label: string }[] = [
+  { id: "standing", label: "Debout" },
+  { id: "walking", label: "Marche" },
+  { id: "sitting", label: "Assise" },
+  { id: "squatting", label: "Accroupie" },
+];
 
 const DISPLAY_MODES: { id: FitMode | null; label: string; title: string }[] = [
   { id: null, label: "Tissu", title: "Rendu du tissu" },
@@ -101,16 +109,16 @@ export default function Studio() {
   const [editorOpen, setEditorOpen] = useState(false);
   const closeEditor = useCallback(() => setEditorOpen(false), []);
   const selectTab = (id: Tab) => {
-    // Poses and motion belong to the pose tab: leaving it, the mannequin stands still again.
-    if (tab === "pose" && id !== "pose") {
-      setWalking(false);
-      setPosture("standing");
-      setCadence(CADENCE.default);
-      viewerRef.current?.releaseHands();
-    }
     setTab(id);
     setEditorOpen(id === "patron");
   };
+  // The pose is chosen on the 3D view itself, whatever the tab: a held posture stops the walk, and walking stands the mannequin up.
+  const pose: Pose = walking ? "walking" : posture;
+  const choosePose = (next: Pose) => {
+    setWalking(next === "walking");
+    setPosture(next === "walking" ? "standing" : next);
+  };
+  const gait = cadence >= RUN_CADENCE.to ? "course" : cadence > RUN_CADENCE.from ? "trot" : "marche";
 
   // Fabric
   const [textileId, setTextileId] = useState(TEXTILES[0].id);
@@ -481,6 +489,33 @@ export default function Studio() {
                 </div>
               )}
             </div>
+            {ready && (
+              <label className="flex items-center gap-1.5 rounded-full border border-line bg-white/80 py-1 pl-3.5 pr-2 text-xs shadow-sm backdrop-blur">
+                <span className="text-muted">Pose</span>
+                <select value={pose} onChange={(e) => choosePose(e.target.value as Pose)} className="cursor-pointer bg-transparent py-0.5 pr-1 font-medium outline-none" aria-label="Pose du mannequin">
+                  {POSES.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.id === "walking" && cadence >= RUN_CADENCE.to ? "Course" : p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {ready && walking && (
+              <div className="w-52 max-w-full rounded-xl border border-line bg-white/80 px-3 py-2 shadow-sm backdrop-blur">
+                <RangeField
+                  label="Cadence"
+                  value={cadence}
+                  min={CADENCE.min}
+                  max={CADENCE.max}
+                  step={5}
+                  display={`${cadence} pas/min · ${gait}`}
+                  ends={["Marche lente", "Course"]}
+                  onChange={setCadence}
+                  onDoubleClick={() => setCadence(CADENCE.default)}
+                />
+              </div>
+            )}
             {fitMode && <FitLegend mode={fitMode} />}
           </div>
 
@@ -586,22 +621,6 @@ export default function Studio() {
               onShowLocal={setShowLocal}
               localTapes={local.tapes}
               localSpans={local.spans}
-            />
-          )}
-          {tab === "pose" && (
-            <PosePanel
-              cadence={cadence}
-              onCadence={setCadence}
-              walking={walking}
-              onWalking={(on) => {
-                setWalking(on);
-                if (on) setPosture("standing");
-              }}
-              posture={posture}
-              onPosture={(p) => {
-                setPosture(p);
-                if (p !== "standing") setWalking(false);
-              }}
             />
           )}
           {tab === "patron" && (
