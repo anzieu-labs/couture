@@ -29,6 +29,7 @@ import { PatternPanel } from "./PatternPanel";
 import { RangeField } from "./RangeField";
 import { edgeColorer } from "./seamColors";
 import { TextilePanel } from "./TextilePanel";
+import { TextilePicker } from "./TextilePicker";
 
 type Tab = "morpho" | "patron" | "tissu";
 
@@ -84,6 +85,19 @@ function readMorphology(v: unknown): Morphology | null {
   if (!keys.every((k) => isNumber(m[k])) || !m.local || typeof m.local !== "object") return null;
   const local = Object.fromEntries(Object.entries(m.local as Record<string, unknown>).filter((e): e is [string, number] => isNumber(e[1])));
   return { ...(Object.fromEntries(keys.map((k) => [k, m[k]])) as Omit<Morphology, "local">), local };
+}
+
+/**
+ * One of the things the side panel shows in turn — the workshop's tabs, the garment or the
+ * textile picker, the 2D editor: only one at a time, and at once (no transition: asked on
+ * 2026-11-23, after a slide and a fade were tried). The others stay mounted, out of the page.
+ */
+function SideLayer({ shown, base, children }: { shown: boolean; base?: boolean; children: React.ReactNode }) {
+  return (
+    <div inert={!shown} className={shown ? (base ? "flex h-full flex-col" : "absolute inset-0 bg-panel") : "hidden"}>
+      {children}
+    </div>
+  );
 }
 
 export default function Studio() {
@@ -257,8 +271,10 @@ export default function Studio() {
   // The workshop's own panel, on the left, folds away the same way to leave the room to the 3D view (desktop: on a phone it is the page under the view).
   const [panelOpen, setPanelOpen] = useState(true);
   // The garment picker takes the place of the panel while a garment is chosen; what the last DXF import read is told in the pattern tab afterwards.
-  const [picking, setPicking] = useState(false);
-  const closePicker = useCallback(() => setPicking(false), []);
+  const [picker, setPicker] = useState<"garment" | "textile" | null>(null);
+  const picking = picker === "garment";
+  const setPicking = (on: boolean) => setPicker(on ? "garment" : null);
+  const closePicker = useCallback(() => setPicker(null), []);
   const [imported, setImported] = useState<DxfImport | null>(null);
   // What a tool reads back once the body has settled: the measurements of then, not of the render it was called in.
   const latest = useRef({ measurements: body.measurements, saturated: body.saturated, targets: body.targets, textileId });
@@ -430,7 +446,7 @@ export default function Studio() {
       {/* ------------------------------------------------------------ 3D */}
       <section className="relative flex h-[58dvh] shrink-0 md:h-full md:flex-1" aria-label="Aperçu 3D">
         <div className="relative min-w-0 flex-1">
-          <div ref={viewportRef} className="absolute inset-0" />
+          <div ref={viewportRef} className="absolute inset-0 overflow-hidden" />
 
           {!panelOpen && (
             <button
@@ -531,12 +547,12 @@ export default function Studio() {
       {/* --------------------------------------------------------- Panel */}
       {/* Desktop: the panel on the left, the 3D view then the 2D pattern on its right; mobile: under the 3D view. */}
       <aside
-        className={`flex min-h-0 flex-1 flex-col border-line bg-panel md:order-first md:h-full md:flex-none md:border-r md:transition-[width] md:duration-300 md:ease-out ${editing ? "md:w-[540px]" : "md:w-[360px]"} ${panelOpen ? "" : "md:hidden"}`}
+        className={`flex min-h-0 flex-1 flex-col border-line bg-panel md:order-first md:h-full md:flex-none md:border-r ${editing ? "md:w-[540px]" : "md:w-[360px]"} ${panelOpen ? "" : "md:hidden"}`}
         aria-label="Atelier"
       >
-        {/* The panel and, in its place, the garment picker while a garment is chosen or the 2D editor while the pattern is edited: one slides out as the other slides in. */}
+        {/* The panel and, in its place, the garment or textile picker while one is chosen, or the 2D editor while the pattern is edited. */}
         <div className="relative min-h-0 flex-1 overflow-hidden">
-          <div className={`flex h-full flex-col transition-[transform,opacity] duration-300 ease-out ${picking || editing ? "pointer-events-none -translate-x-8 opacity-0" : ""}`} inert={picking || editing}>
+          <SideLayer base shown={!picker && !editing}>
           <header className="flex items-end gap-2 border-b border-line px-5 pt-3 md:pt-4">
             <h1 className="sr-only">Atelier</h1>
             <div role="tablist" className="flex min-w-0 flex-1 gap-5">
@@ -606,22 +622,20 @@ export default function Studio() {
             )}
             {tab === "tissu" && (
               <TextilePanel
-                textile={textile}
-                textiles={textiles}
-                onTextile={setTextileId}
-                onCustom={setCustom}
-                colors={colors}
-                colorsById={colorsById}
-                onColor={(key, hex) => setColorsById((prev) => ({ ...prev, [textileId]: { ...prev[textileId], [key]: hex } }))}
-              />
+              textile={textile}
+              onPick={() => setPicker("textile")}
+              onCustom={setCustom}
+              colors={colors}
+              onColor={(key, hex) => setColorsById((prev) => ({ ...prev, [textileId]: { ...prev[textileId], [key]: hex } }))}
+            />
             )}
           </div>
 
           <footer className="border-t border-line px-5 py-3 text-[11px] leading-relaxed text-muted">
             Corps : modèle Anny (NAVER LABS Europe, Apache 2.0) issu de MakeHuman (CC0).
           </footer>
-          </div>
-          <div className={`absolute inset-0 transition-[transform,opacity] duration-300 ease-out ${picking ? "" : "pointer-events-none translate-x-8 opacity-0"}`} inert={!picking}>
+          </SideLayer>
+          <SideLayer shown={picking}>
             <GarmentPicker
               open={picking}
               current={garment.garment.id}
@@ -658,8 +672,21 @@ export default function Studio() {
               canCopy={garment.canCopy}
               onClose={closePicker}
             />
-          </div>
-          <div className={`absolute inset-0 bg-panel transition-[transform,opacity] duration-300 ease-out ${editing && !picking ? "" : "pointer-events-none translate-x-8 opacity-0"}`} inert={!editing || picking}>
+          </SideLayer>
+          <SideLayer shown={picker === "textile"}>
+            <TextilePicker
+              open={picker === "textile"}
+              textiles={textiles}
+              current={textile.id}
+              colorsById={colorsById}
+              onSelect={(id) => {
+                setTextileId(id);
+                setPicker(null);
+              }}
+              onClose={closePicker}
+            />
+          </SideLayer>
+          <SideLayer shown={editing && !picker}>
             {editing && garment.measures && (
               <PatternEditor
                 key={garment.kind}
@@ -688,7 +715,7 @@ export default function Studio() {
                 onClose={closeEditor}
               />
             )}
-          </div>
+          </SideLayer>
         </div>
       </aside>
 

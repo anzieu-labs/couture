@@ -1,29 +1,25 @@
 "use client";
 
-import { useState } from "react";
 import { CUSTOM_TEXTILE, drapeOf, PALETTE, TEXTILE_FIELDS, TEXTILES, withLook, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
 import { RangeField } from "./RangeField";
 import { Section } from "./Section";
 import { Swatch } from "./Swatch";
-import { TextilePicker, textileSummary } from "./TextilePicker";
+import { textileSummary } from "./TextilePicker";
 
 type Custom = Textile & { look: string };
 
 interface Props {
   textile: Textile;
-  /** The textiles offered: the library's, then the user's own, which `onCustom` changes. */
-  textiles: readonly Textile[];
-  onTextile: (id: string) => void;
+  /** The textile picker is asked for (it takes the place of the panel: Studio.tsx). */
+  onPick: () => void;
   onCustom: (textile: Custom) => void;
-  /** The colours of `textile` as shown, and every textile's as chosen. */
+  /** The colours of `textile` as shown. */
   colors: TextileColors;
-  colorsById: Record<string, TextileColors>;
   onColor: (key: keyof TextileColors, hex: string) => void;
 }
 
-export function TextilePanel({ textile, textiles, onTextile, onCustom, colors, colorsById, onColor }: Props) {
-  const [picking, setPicking] = useState(false);
+export function TextilePanel({ textile, onPick, onCustom, colors, onColor }: Props) {
   return (
     <>
       <Section title="Tissu">
@@ -35,23 +31,12 @@ export function TextilePanel({ textile, textiles, onTextile, onCustom, colors, c
           </div>
           <button
             type="button"
-            onClick={() => setPicking(true)}
+            onClick={onPick}
             className="shrink-0 rounded-full border border-ink px-3 py-1.5 text-xs font-medium transition-colors hover:bg-ink hover:text-white"
           >
             Changer
           </button>
         </div>
-        <TextilePicker
-          open={picking}
-          textiles={textiles}
-          current={textile.id}
-          colorsById={colorsById}
-          onSelect={(id) => {
-            onTextile(id);
-            setPicking(false);
-          }}
-          onClose={() => setPicking(false)}
-        />
       </Section>
 
       {textile.id === CUSTOM_TEXTILE && <CustomFields textile={textile as Custom} onChange={onCustom} />}

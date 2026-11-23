@@ -105,6 +105,9 @@ interface Tween {
   targetTo: THREE.Vector3;
 }
 
+/** How long the container must keep its size for the picture to be fitted to it again (ms): longer than a frame, shorter than a glance. */
+const RESIZE_REST = 140;
+
 /**
  * Three.js scene: WebGPU renderer (automatic WebGL 2 fallback), studio lighting,
  * parametric Anny mannequin (morphology computed on the CPU) and a garment
@@ -142,6 +145,8 @@ export class GarmentViewer {
   private readonly camera: THREE.PerspectiveCamera;
   private readonly controls: OrbitControls;
   private readonly resizeObserver: ResizeObserver;
+  /** The size the picture is drawn at, when the container last changed size, and the fit waiting for it to rest (resize). */
+  private readonly resized: { w: number; h: number; at: number; timer: ReturnType<typeof setTimeout> | null } = { w: 0, h: 0, at: -Infinity, timer: null };
   private readonly figure = new THREE.Group();
   private readonly handles: HandHandles;
   private readonly grabber: ClothGrab;
@@ -752,9 +757,34 @@ export class GarmentViewer {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /**
+   * The container changed size. A size that keeps changing (the side panel sliding open, a
+   * window being dragged) is not followed step by step: reconfiguring the canvas at every frame
+   * is what made the slide stutter. The first change is fitted at once; while more keep coming
+   * the picture stays as it is, centred in its container (cropped, or with the background at
+   * its sides — the figure is in the middle and keeps its size, the field of view being
+   * vertical), and is fitted again once the container rests.
+   */
   private resize() {
     const { clientWidth: w, clientHeight: h } = this.container;
     if (!w || !h) return;
+    const now = performance.now(), moving = now - this.resized.at < RESIZE_REST && this.resized.w > 0;
+    this.resized.at = now;
+    if (this.resized.timer) clearTimeout(this.resized.timer);
+    if (!moving) return this.fit(w, h);
+    Object.assign(this.renderer.domElement.style, { position: "absolute", left: "50%", top: "50%", width: `${this.resized.w}px`, height: `${this.resized.h}px`, transform: "translate(-50%, -50%)" });
+    this.resized.timer = setTimeout(() => {
+      this.resized.timer = null;
+      const { clientWidth, clientHeight } = this.container;
+      if (clientWidth && clientHeight) this.fit(clientWidth, clientHeight);
+    }, RESIZE_REST);
+  }
+
+  /** The picture drawn at the container's size. */
+  private fit(w: number, h: number) {
+    this.resized.w = w;
+    this.resized.h = h;
+    Object.assign(this.renderer.domElement.style, { position: "", left: "", top: "", width: "100%", height: "100%", transform: "" });
     this.camera.aspect = w / h;
     // keep the whole figure in frame on narrow (portrait) screens
     this.camera.fov = w / h < 0.8 ? 38 : 28;
@@ -798,6 +828,7 @@ export class GarmentViewer {
   dispose() {
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect();
+    if (this.resized.timer) clearTimeout(this.resized.timer);
     this.controls.dispose();
     this.simulator.dispose();
     this.removeGarment();

@@ -39,7 +39,7 @@ const DRAWING = "free";
 
 /**
  * The garment picker: it takes the place of the workshop's side panel while a garment is
- * chosen (Studio.tsx slides one over the other). A search, the cut (the men's or the women's of
+ * chosen (Studio.tsx). A search, the cut (the men's or the women's of
  * each garment of the catalogue), a pattern of one's own to start, then small cards — the
  * shared library, the visitor's own patterns, the catalogue (meant to grow to dozens of
  * garments), each with a picture and its name. Escape goes back.

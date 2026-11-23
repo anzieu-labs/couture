@@ -411,10 +411,17 @@ Référence pour les prochaines étapes. Mettre à jour les cases et les notes �
   « Recoudre », qui repose le vêtement porté sur le mannequin, le recoud et le redrape (la vue
   se tourne à la main ; l'assistant sait toujours cadrer une vue). Le bouton de rotation
   automatique est retiré aussi (l'assistant peut encore la lancer ou l'arrêter).
-  Le sélecteur de vêtement n'est plus une fenêtre : « Changer » le fait glisser à la place du
-  panneau latéral (transition de 300 ms, Échap ou la flèche pour revenir), sur deux colonnes.
+  Le sélecteur de vêtement n'est plus une fenêtre : « Changer » le met à la place du panneau
+  latéral (Échap ou la flèche pour revenir), sur deux colonnes.
   Le titre « Atelier » et son sous-titre sont retirés : les onglets sont en haut du panneau.
-  L'éditeur 2D fait de même : « Éditer le patron en 2D » le fait glisser à la place du panneau,
+  Le sélecteur de tissu aussi (plus de fenêtre : il prend la place du panneau), avec une
+  recherche (nom, famille, armure, composition, tombé ; sans accents ni casse) ; sans
+  résultat, elle propose le « Tissu sur mesure ».
+  Pas de transition entre ces contenus (décidé le 2026-11-23, après essai d'un glissé-fondu) :
+  le changement est immédiat, le panneau prend sa largeur d'un coup. La vue 3D, elle, ne se
+  redessine plus à chaque étape d'un changement de taille (`GarmentViewer.resize` : l'image
+  reste centrée dans son cadre et n'est réajustée qu'une fois le cadre au repos, 140 ms).
+  L'éditeur 2D fait de même : « Éditer le patron en 2D » le met à la place du panneau,
   qui s'élargit de moitié (360 → 540 px) ; le fermer ramène le panneau. Il ne s'ouvre plus tout
   seul en entrant dans l'onglet Patron, et n'occupe plus la moitié de la vue 3D.
   Le panneau de gauche (« Atelier ») se replie comme l'assistant (flèche dans son en-tête, bouton

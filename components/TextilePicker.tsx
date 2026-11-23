@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CUSTOM_TEXTILE, type Textile } from "@/lib/textiles/catalog";
 import type { TextileColors } from "@/lib/textiles/generate";
+import { searchable } from "./hooks/useLibrary";
 import { Swatch } from "./Swatch";
 
 interface Props {
@@ -21,54 +22,73 @@ interface Props {
 export const textileSummary = (t: Textile) => `${t.family} · ${t.weight} g/m² · ${t.drape}`;
 
 /**
- * Full-page textile picker, the garment picker's twin (GarmentPicker.tsx): a grid of small
- * cards, each with a swatch of the textile in its colours, its name and what it is. A native
- * modal dialog (focus kept inside, Escape closes); a click outside the cards closes it too.
+ * The textile picker, the garment picker's twin (GarmentPicker.tsx): it takes the place of the
+ * workshop's side panel while a textile is chosen (Studio.tsx). A search, then small cards,
+ * each with a swatch of the textile in its colours, its name and what it is. Escape goes back.
  */
 export function TextilePicker({ open, textiles, current, colorsById, onSelect, onClose }: Props) {
-  const ref = useRef<HTMLDialogElement>(null);
-
+  const search = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    const d = ref.current;
-    if (!d) return;
-    if (open && !d.open) d.showModal();
-    else if (!open && d.open) d.close();
-  }, [open]);
+    if (!open) return;
+    search.current?.focus({ preventScroll: true });
+    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [open, onClose]);
+  // The swatches are drawn the first time the picker opens, not with the panel.
+  const [seen, setSeen] = useState(open);
+  if (open && !seen) setSeen(true);
+  // Search: the textiles whose name or description (family, weave, composition, drape) has every word typed.
+  const [query, setQuery] = useState("");
+  const words = searchable(query).split(/\s+/).filter(Boolean);
+  const found = textiles.filter((t) => {
+    const text = searchable(`${t.name} ${t.family} ${t.structure} ${t.composition} ${t.drape} ${t.weight} g`);
+    return words.every((w) => text.includes(w));
+  });
+  // Nothing of the library answers the search: the user's own textile, to be set to what they were looking for.
+  const none = words.length > 0 && !found.length;
+  const shown = none ? textiles.filter((t) => t.id === CUSTOM_TEXTILE) : found;
 
   return (
-    <dialog
-      ref={ref}
-      onClose={onClose}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      aria-labelledby="textile-picker-title"
-      className="fixed inset-0 m-0 h-dvh max-h-none w-dvw max-w-none overflow-y-auto bg-canvas/95 p-0 text-ink backdrop:bg-ink/30 backdrop:backdrop-blur-sm"
-    >
-      <div className="mx-auto flex min-h-full max-w-6xl flex-col px-4 py-6 md:px-8 md:py-8" onClick={(e) => e.target === e.currentTarget && onClose()}>
-        <header className="mb-5 flex items-center gap-4">
-          <div className="min-w-0 flex-1">
-            <h2 id="textile-picker-title" className="text-xl font-semibold tracking-tight">
-              Choisir un tissu
-            </h2>
-            <p className="mt-0.5 text-xs text-muted">Son aspect, et sa mécanique : grammage, rigidité, élasticité. Le vêtement est recousu dedans.</p>
-          </div>
+    <div className="flex h-full min-h-0 flex-col bg-panel" role="region" aria-labelledby="textile-picker-title">
+      <header className="border-b border-line px-5 pb-3 pt-3 md:pt-4">
+        <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={onClose}
-            aria-label="Fermer"
-            className="grid size-9 shrink-0 place-items-center rounded-full border border-line bg-white/80 text-muted transition-colors hover:border-ink hover:text-ink"
+            aria-label="Revenir à l'atelier"
+            title="Retour"
+            className="grid size-7 shrink-0 place-items-center rounded-full border border-line text-muted transition-colors hover:border-ink hover:text-ink"
           >
-            <svg viewBox="0 0 20 20" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-              <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" />
+            <svg viewBox="0 0 20 20" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+              <path d="M12 5l-5 5 5 5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-        </header>
+          <h2 id="textile-picker-title" className="min-w-0 flex-1 truncate text-sm font-semibold tracking-tight">
+            Choisir un tissu
+          </h2>
+        </div>
+        <input
+          ref={search}
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Rechercher un tissu…"
+          aria-label="Rechercher un tissu"
+          className="mt-2.5 w-full rounded-full border border-line bg-white/80 px-3.5 py-1.5 text-xs outline-none placeholder:text-muted focus:border-ink"
+        />
+      </header>
 
-        {/* The swatches are drawn when the picker opens, not with the panel. */}
-        {open && (
-          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-            {textiles.map((t) => {
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <p className="mb-3 text-[11px] leading-snug text-muted">Son aspect, et sa mécanique : grammage, rigidité, élasticité. Le vêtement est recousu dedans.</p>
+        {seen && none && (
+          <p className="mb-3 rounded-xl border border-line bg-white/50 p-3 text-xs text-muted">
+            Aucun tissu de la bibliothèque ne correspond à « {query.trim()} ». Définissez-le vous-même : grammage, épaisseur, rigidité, élasticité.
+          </p>
+        )}
+        {seen && (
+          <ul className="grid grid-cols-2 gap-2.5">
+            {shown.map((t) => {
               const selected = t.id === current, own = t.id === CUSTOM_TEXTILE;
               return (
                 <li key={t.id}>
@@ -95,6 +115,6 @@ export function TextilePicker({ open, textiles, current, colorsById, onSelect, o
           </ul>
         )}
       </div>
-    </dialog>
+    </div>
   );
 }
